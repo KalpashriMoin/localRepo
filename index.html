@@ -518,5 +518,84 @@ st.markdown("""
 <div style="text-align:center;padding:22px 0 10px;color:#94A3B8;
   font-size:11px;letter-spacing:.4px;">
 VLDS Process · Forest Dealerships · Confidential
+
 </div>""", unsafe_allow_html=True)
-          
+
+
+
+"""reader.py — read bytes → DataFrame. Always stores raw bytes, never file objects."""
+import io
+import pandas as pd
+
+
+def get_sheet_names(raw: bytes, filename: str) -> list:
+    """Return sheet names from raw bytes."""
+    nm = filename.lower()
+    try:
+        if nm.endswith(".xlsb"):
+            import pyxlsb
+            with pyxlsb.open_workbook(io.BytesIO(raw)) as wb:
+                return list(wb.sheets)
+        if nm.endswith(".csv"):
+            return []
+        return pd.ExcelFile(io.BytesIO(raw), engine="openpyxl").sheet_names
+    except Exception:
+        return []
+
+
+def read_bytes(raw: bytes, filename: str, sheet=0) -> pd.DataFrame:
+    """Parse raw bytes → clean DataFrame. Raises IOError with plain English on failure."""
+    nm = filename.lower()
+    errors = []
+
+    if nm.endswith(".csv"):
+        for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try:
+                df = pd.read_csv(io.BytesIO(raw), encoding=enc,
+                                 on_bad_lines="skip", low_memory=False)
+                return _clean(df)
+            except Exception as e:
+                errors.append(str(e))
+        raise IOError("Cannot read CSV: " + " | ".join(errors))
+
+    if nm.endswith(".xlsb"):
+        try:
+            import pyxlsb
+            df = pd.read_excel(io.BytesIO(raw), engine="pyxlsb", sheet_name=sheet)
+            return _clean(_pick(df))
+        except Exception as e:
+            raise IOError(f"Cannot read XLSB: {e}\nFix: Open in Excel → Save As → .xlsx → re-upload.")
+
+    engines = ["openpyxl"] + (["xlrd"] if nm.endswith(".xls") else [])
+    for eng in engines:
+        try:
+            df = pd.read_excel(io.BytesIO(raw), engine=eng, sheet_name=sheet)
+            return _clean(_pick(df))
+        except Exception as e:
+            errors.append(f"{eng}: {e}")
+
+    raise IOError(
+        "Cannot open file.\n"
+        "Fix:\n"
+        "1. Close the file in Excel first\n"
+        "2. Excel → File → Save As → Excel Workbook (.xlsx)\n"
+        "3. Re-upload the saved file\n\n"
+        "Error detail: " + " | ".join(errors[-2:])
+    )
+
+
+def _pick(x):
+    if not isinstance(x, dict):
+        return x
+    for v in x.values():
+        if not v.empty:
+            return v
+    return list(x.values())[0]
+
+
+def _clean(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+         
