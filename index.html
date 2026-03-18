@@ -609,3 +609,74 @@ st.markdown("""
             color:#94A3B8;font-size:11px;letter-spacing:.4px;">
 VLDS Process · Forest Dealerships · Confidential
 </div>""", unsafe_allow_html=True)
+
+
+
+
+
+
+"""reader.py — read any Excel/CSV into a clean DataFrame."""
+import io, pandas as pd
+
+def sheet_names(f) -> list:
+    try:
+        f.seek(0); raw = f.read()
+        if f.name.lower().endswith(".xlsb"):
+            import pyxlsb
+            with pyxlsb.open_workbook(io.BytesIO(raw)) as wb:
+                return list(wb.sheets)
+        return pd.ExcelFile(io.BytesIO(raw), engine="openpyxl").sheet_names
+    except Exception:
+        return []
+
+def read_df(f, sheet=0) -> pd.DataFrame:
+    """
+    Always reads raw bytes first (BytesIO fix).
+    Tries openpyxl → xlrd for xls → CSV fallback.
+    """
+    f.seek(0); raw = f.read()
+    nm = f.name.lower()
+    errors = []
+
+    if nm.endswith(".csv"):
+        for enc in ("utf-8-sig","utf-8","latin-1","cp1252"):
+            try:
+                return _clean(pd.read_csv(io.BytesIO(raw), encoding=enc,
+                                          on_bad_lines="skip", low_memory=False))
+            except Exception as e:
+                errors.append(str(e))
+        raise IOError("CSV failed: " + " | ".join(errors))
+
+    if nm.endswith(".xlsb"):
+        try:
+            import pyxlsb
+            return _clean(_pick(pd.read_excel(io.BytesIO(raw), engine="pyxlsb",
+                                              sheet_name=sheet)))
+        except Exception as e:
+            raise IOError(f"XLSB failed: {e}\nFix: Save As .xlsx in Excel.")
+
+    engines = ["openpyxl"] + (["xlrd"] if nm.endswith(".xls") else [])
+    for eng in engines:
+        try:
+            df = pd.read_excel(io.BytesIO(raw), engine=eng, sheet_name=sheet)
+            return _clean(_pick(df))
+        except Exception as e:
+            errors.append(f"{eng}: {e}")
+
+    raise IOError(
+        "Cannot open file.\n"
+        "Fix: Close in Excel → Save As → .xlsx → re-upload.\n"
+        "Detail: " + " | ".join(errors[-2:])
+    )
+
+def _pick(x):
+    if not isinstance(x, dict): return x
+    for v in x.values():
+        if not v.empty and len(v) > 0: return v
+    return list(x.values())[0]
+
+def _clean(df):
+    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
