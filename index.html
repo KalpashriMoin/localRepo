@@ -900,6 +900,132 @@ def make_summary(el, excl_df, prev, slab) -> pd.DataFrame:
              for c in out.columns}
     return pd.concat([out, pd.DataFrame([tot])], ignore_index=True).reset_index(drop=True)
 
+
+
+
+     """report.py — 2-sheet Excel output: Pivot + Final Summary."""
+import io
+import numpy as np
+import pandas as pd
+from datetime import datetime
+
+
+def _sv(v):
+    if v is None: return ""
+    if isinstance(v, float) and (np.isnan(v) or np.isinf(v)): return ""
+    return v
+
+def _clean(df):
+    df = df.copy()
+    for c in df.columns:
+        if df[c].dtype in (float,"float64","float32"):
+            df[c] = df[c].replace([np.inf,-np.inf],np.nan).fillna(0)
+        else:
+            try: df[c] = df[c].fillna("")
+            except: pass
+    return df
+
+def generate(pivot: pd.DataFrame, summary: pd.DataFrame, quarter: str, mode: str) -> io.BytesIO:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter",
+                        engine_kwargs={"options":{"nan_inf_to_errors":True}}) as wr:
+        wb = wr.book
+        _pivot(wb, wr, _clean(pivot),   f"{quarter} · {mode}")
+        _summ(wb,  wr, _clean(summary), f"{quarter} · {mode}")
+    buf.seek(0)
+    return buf
+
+def _f(wb, **kw):
+    return wb.add_format({"font_name":"Calibri","font_size":9,"border":1,**kw})
+
+def _pivot(wb, wr, df, label):
+    ws = wb.add_worksheet("Pivot"); wr.sheets["Pivot"] = ws
+    T  = _f(wb,bold=True,font_size=13,font_color="FFFFFF",bg_color="0B1829",
+              align="center",valign="vcenter",border=0)
+    HB = _f(wb,bold=True,font_size=10,font_color="FFFFFF",bg_color="1A3F6F",
+              align="center",text_wrap=True)
+    HG = _f(wb,bold=True,font_size=10,font_color="FFFFFF",bg_color="1A7A4A",align="center")
+    HO = _f(wb,bold=True,font_size=10,font_color="FFFFFF",bg_color="7B3F00",align="center")
+    TE = _f(wb,bg_color="EBF3FB"); TO = _f(wb,bg_color="FFFFFF")
+    NE = _f(wb,bg_color="EBF3FB",num_format="#,##0.00")
+    NO = _f(wb,bg_color="FFFFFF",num_format="#,##0.00")
+    TN = _f(wb,bold=True,bg_color="0B1829",font_color="FFFFFF",num_format="#,##0.00")
+    TL = _f(wb,bold=True,bg_color="0B1829",font_color="FFFFFF")
+
+    ws.merge_range(0,0,0,len(df.columns)-1,
+                   f"VLDS Pivot — Revenue by Customer × Month  |  {label}",T)
+    ws.set_row(0,28)
+
+    ids = [c for c in df.columns if any(k in str(c).lower()
+           for k in ("customer","name","number","zone")) and c!="Grand Total"]
+    mc  = [c for c in df.columns if c not in ids and c!="Grand Total"]
+    last = len(df)-1
+
+    for ci,c in enumerate(df.columns):
+        hf = HO if c=="Grand Total" else (HG if c in mc else HB)
+        ws.write(1,ci,str(c),hf)
+        ws.set_column(ci,ci,max(len(str(c))+4,14))
+    ws.set_row(1,24)
+
+    for ri,row in df.iterrows():
+        ev = ri%2==0; is_tot = ri==last
+        for ci,c in enumerate(df.columns):
+            v = _sv(row[c])
+            if is_tot:   ws.write(ri+2,ci,v, TL if c in ids else TN)
+            elif c in mc or c=="Grand Total": ws.write(ri+2,ci,v, NE if ev else NO)
+            else:        ws.write(ri+2,ci,v, TE if ev else TO)
+    ws.freeze_panes(2,0)
+
+def _summ(wb, wr, df, label):
+    ws = wb.add_worksheet("Final Summary"); wr.sheets["Final Summary"] = ws
+    T  = _f(wb,bold=True,font_size=13,font_color="FFFFFF",bg_color="0B1829",
+              align="center",valign="vcenter",border=0)
+    HB = _f(wb,bold=True,font_size=10,font_color="FFFFFF",bg_color="1A3F6F",
+              align="center",text_wrap=True)
+    HG = _f(wb,bold=True,font_size=10,font_color="FFFFFF",bg_color="1A7A4A",
+              align="center",text_wrap=True)
+    HD = _f(wb,bold=True,font_size=10,font_color="FFFFFF",bg_color="7B3F00",
+              align="center",text_wrap=True)
+    TE = _f(wb,bg_color="EBF3FB"); TO = _f(wb,bg_color="FFFFFF")
+    NE = _f(wb,bg_color="EBF3FB",num_format="#,##0.00")
+    NO = _f(wb,bg_color="FFFFFF",num_format="#,##0.00")
+    PE = _f(wb,bg_color="EBF3FB",num_format="0.00"); PO = _f(wb,bg_color="FFFFFF",num_format="0.00")
+    DE = _f(wb,bold=True,bg_color="E8F5E9",num_format="#,##0.00")
+    DO = _f(wb,bold=True,bg_color="F1FFF4",num_format="#,##0.00")
+    TN = _f(wb,bold=True,bg_color="0B1829",font_color="FFFFFF",num_format="#,##0.00")
+    TL = _f(wb,bold=True,bg_color="0B1829",font_color="FFFFFF")
+
+    ws.merge_range(0,0,0,len(df.columns)-1,
+                   f"VLDS Final Summary  |  {label}  |  "
+                   f"{datetime.now().strftime('%d %b %Y  %I:%M %p')}",T)
+    ws.set_row(0,28)
+
+    money = {"amount","q4","deducted","increase"}
+    disc  = {"discount value"}
+    pct   = {"growth","discount %"}
+
+    for ci,c in enumerate(df.columns):
+        cl = c.lower()
+        hf = (HD if any(k in cl for k in disc) else
+              HG if any(k in cl for k in money|pct) else HB)
+        ws.write(1,ci,c,hf)
+        ws.set_column(ci,ci,max(len(c)+4,14))
+    ws.set_row(1,32)
+
+    last = len(df)-1
+    for ri,row in df.iterrows():
+        ev=ri%2==0; it=ri==last
+        for ci,c in enumerate(df.columns):
+            v=_sv(row[c]); cl=c.lower()
+            if it:
+                ws.write(ri+2,ci,v,TL if any(k in cl for k in ("name","number","zone","slab")) else TN)
+            elif any(k in cl for k in disc):   ws.write(ri+2,ci,v,DE if ev else DO)
+            elif any(k in cl for k in pct):    ws.write(ri+2,ci,v,PE if ev else PO)
+            elif any(k in cl for k in money):  ws.write(ri+2,ci,v,NE if ev else NO)
+            else:                               ws.write(ri+2,ci,v,TE if ev else TO)
+    ws.freeze_panes(2,2)
+                        
+
          
 
          
