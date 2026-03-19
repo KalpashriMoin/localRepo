@@ -1,1 +1,1220 @@
+"""
+VLDS Quarterly Incentive Process
+Single file — no modules folder needed.
+Run: python -m streamlit run app.py
+"""
+import io
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import streamlit as st
 
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="VLDS Process", page_icon="📊",
+                   layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Playfair+Display:wght@600&display=swap');
+:root{--navy:#0C1E35;--blue:#163354;--acc:#1D5FAC;--gold:#C9952A;
+  --amber:#F5C842;--green:#1A7A4A;--red:#C0392B;--bg:#EEF2F7;
+  --card:#fff;--border:#D4DCE8;--muted:#6B7A96;}
+html,body,[class*="css"]{font-family:'Outfit',sans-serif;background:var(--bg);color:var(--navy);}
+#MainMenu,footer,header,.stDeployButton{visibility:hidden;display:none;}
+.hdr{background:linear-gradient(120deg,#0C1E35,#163354 55%,#1D5FAC);
+  border-radius:16px;padding:28px 36px 24px;margin-bottom:22px;
+  box-shadow:0 8px 30px rgba(12,30,53,.24);position:relative;overflow:hidden;}
+.hdr::before{content:'';position:absolute;top:-50px;right:-30px;width:200px;height:200px;
+  border-radius:50%;background:radial-gradient(circle,rgba(245,200,66,.16),transparent 65%);}
+.hdr-pre{font-size:10px;letter-spacing:4px;text-transform:uppercase;color:var(--amber);
+  font-weight:700;margin-bottom:8px;}
+.hdr-title{font-family:'Playfair Display',serif;font-size:1.85rem;color:#fff;margin:0 0 5px;}
+.hdr-sub{color:rgba(255,255,255,.45);font-size:13px;margin:0;}
+.pills{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;}
+.pill{display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.1);
+  border:1px solid rgba(255,255,255,.18);border-radius:18px;padding:4px 12px;
+  font-size:11px;color:rgba(255,255,255,.82);font-weight:600;}
+.pill.gold{background:rgba(201,149,42,.22);border-color:rgba(201,149,42,.5);color:var(--amber);}
+.pill.g{background:rgba(26,122,74,.22);border-color:rgba(26,122,74,.5);color:#6EE7A7;}
+.pill.r{background:rgba(192,57,43,.22);border-color:rgba(192,57,43,.4);color:#FCA5A5;}
+.sec{font-family:'Playfair Display',serif;font-size:.92rem;color:var(--navy);font-weight:600;
+  display:flex;align-items:center;gap:9px;margin:22px 0 10px;}
+.sec::after{content:'';flex:1;height:1px;background:linear-gradient(to right,var(--border),transparent);}
+.fc{border-radius:12px;padding:13px 15px 10px;margin-bottom:3px;
+  border:2px dashed var(--border);background:var(--card);transition:all .2s;}
+.fc.loaded{border-style:solid;border-color:#22C55E;background:#F0FDF4;}
+.fc.errd{border-style:solid;border-color:var(--red);background:#FEF2F2;}
+.fc-row{display:flex;justify-content:space-between;align-items:center;}
+.fc-name{font-size:12px;font-weight:700;color:var(--navy);}
+.fc-desc{font-size:10px;color:var(--muted);margin-top:2px;line-height:1.4;}
+.fc-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;}
+.fc-badge.ok{color:#16A34A;background:#DCFCE7;}
+.fc-badge.no{color:var(--muted);background:#F1F5F9;}
+.fc-badge.er{color:var(--red);background:#FEF2F2;}
+.fc-info{font-size:10px;color:var(--acc);margin-top:5px;}
+.krow{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;}
+.kc{background:var(--card);border-radius:11px;padding:15px 18px;flex:1;min-width:105px;
+  border:1px solid var(--border);border-top:3px solid var(--acc);}
+.kc.g{border-top-color:var(--green);}
+.kc.r{border-top-color:var(--red);}
+.kc.a{border-top-color:var(--gold);}
+.kval{font-size:1.4rem;font-weight:800;color:var(--navy);line-height:1;}
+.klbl{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;
+  letter-spacing:.5px;margin-top:4px;}
+.al{border-radius:9px;padding:10px 14px;margin:6px 0;font-size:12px;line-height:1.6;}
+.al b{display:block;font-size:13px;margin-bottom:2px;}
+.al p{margin:0;white-space:pre-line;}
+.al.ok{background:#F0FDF6;border:1px solid #86EFAC;border-left:4px solid var(--green);}
+.al.err{background:#FEF2F2;border:1px solid #FCA5A5;border-left:4px solid var(--red);}
+.al.warn{background:#FFFBEB;border:1px solid #FDE68A;border-left:4px solid var(--gold);}
+.al.info{background:#EFF6FF;border:1px solid #93C5FD;border-left:4px solid var(--acc);}
+.stButton>button{background:linear-gradient(135deg,#0C1E35,#163354)!important;
+  color:#fff!important;border:none!important;border-radius:9px!important;
+  font-weight:700!important;font-size:14px!important;padding:12px 24px!important;
+  box-shadow:0 4px 12px rgba(12,30,53,.22)!important;transition:all .18s!important;}
+.stButton>button:hover{transform:translateY(-2px)!important;}
+.stButton>button:disabled{opacity:.4!important;transform:none!important;}
+.stDownloadButton>button{background:linear-gradient(135deg,#1A7A4A,#15803D)!important;
+  color:#fff!important;border:none!important;border-radius:9px!important;
+  font-weight:700!important;font-size:15px!important;padding:13px 24px!important;width:100%!important;}
+.stTabs [data-baseweb="tab"]{font-weight:700!important;}
+hr{border-color:var(--border)!important;margin:18px 0!important;}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FILE READING — stores raw bytes immediately on upload
+# ═════════════════════════════════════════════════════════════════════════════
+
+def get_sheets(raw: bytes, fname: str) -> list:
+    try:
+        if fname.lower().endswith(".xlsb"):
+            import pyxlsb
+            with pyxlsb.open_workbook(io.BytesIO(raw)) as wb:
+                return list(wb.sheets)
+        if fname.lower().endswith(".csv"):
+            return []
+        return pd.ExcelFile(io.BytesIO(raw), engine="openpyxl").sheet_names
+    except Exception:
+        return []
+
+
+def parse_bytes(raw: bytes, fname: str, sheet=0) -> pd.DataFrame:
+    nm = fname.lower()
+    errors = []
+
+    if nm.endswith(".csv"):
+        for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try:
+                df = pd.read_csv(io.BytesIO(raw), encoding=enc,
+                                 on_bad_lines="skip", low_memory=False)
+                return _tidy(df)
+            except Exception as e:
+                errors.append(str(e))
+        raise IOError("CSV failed: " + " | ".join(errors))
+
+    if nm.endswith(".xlsb"):
+        try:
+            import pyxlsb
+            # Read with header=None so we can detect the real header row
+            df = pd.read_excel(io.BytesIO(raw), engine="pyxlsb",
+                               sheet_name=sheet, header=None)
+            return _tidy(_first(df))
+        except Exception as e:
+            raise IOError(f"XLSB: {e} — Open in Excel → Save As .xlsx → re-upload.")
+
+    engines = ["openpyxl"] + (["xlrd"] if nm.endswith(".xls") else [])
+    for eng in engines:
+        try:
+            # Read with header=None so _tidy can find the real header row
+            df = pd.read_excel(io.BytesIO(raw), engine=eng,
+                               sheet_name=sheet, header=None)
+            return _tidy(_first(df))
+        except Exception as e:
+            errors.append(f"{eng}: {e}")
+
+    raise IOError("Cannot open file. Close in Excel → Save As .xlsx → re-upload.\n"
+                  + " | ".join(errors[-2:]))
+
+
+def _first(x):
+    if not isinstance(x, dict):
+        return x
+    for v in x.values():
+        if not v.empty:
+            return v
+    return list(x.values())[0]
+
+
+def _tidy(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Auto-detect the real header row. Works whether pandas was called with
+    header=0 (default) or header=None.
+    Scans first 20 rows looking for the row with the most recognisable column names.
+    """
+    # Key words we expect in real column headers
+    EXPECTED = {
+        "lob", "zone", "remarks", "item", "segment", "class", "channel",
+        "revenue", "invoice", "customer", "month", "batch", "bd", "amount",
+        "sales", "quantity", "description", "number", "date", "type",
+        "source", "fiscal", "reporting", "order", "sub", "line",
+    }
+
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    def score_row(row_values):
+        vals = {str(v).lower().strip() for v in row_values if pd.notna(v) and str(v).strip()}
+        return sum(1 for e in EXPECTED
+                   if any(e in v for v in vals))
+
+    # Score the current headers
+    current_hdrs = [str(c) for c in df.columns]
+    score0 = score_row(current_hdrs)
+
+    best_row   = -1
+    best_score = score0
+
+    # Scan first 20 data rows
+    for i in range(min(20, len(df))):
+        row_vals = df.iloc[i].tolist()
+        s = score_row(row_vals)
+        if s > best_score:
+            best_score = s
+            best_row   = i
+
+    if best_row >= 0 and best_score > score0:
+        # Use this row as the header
+        new_cols = [str(v).strip() if pd.notna(v) else f"Col_{j}"
+                    for j, v in enumerate(df.iloc[best_row].tolist())]
+        df = df.iloc[best_row + 1:].reset_index(drop=True)
+        df.columns = new_cols
+    else:
+        df.columns = [str(c).strip() for c in df.columns]
+
+    # Final cleanup
+    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    return df
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# COLUMN FINDER — 3-pass: exact, contains, partial
+# ═════════════════════════════════════════════════════════════════════════════
+
+def fc(df, *candidates):
+    """Find column — exact match first, then contains, then partial."""
+    if df is None or df.empty:
+        return None
+    lk = {c.lower().strip(): c for c in df.columns}
+    # Pass 1 exact
+    for cand in candidates:
+        if cand.lower().strip() in lk:
+            return lk[cand.lower().strip()]
+    # Pass 2 contains
+    for cand in candidates:
+        k = cand.lower().strip()
+        for col_l, col_a in lk.items():
+            if k in col_l:
+                return col_a
+    # Pass 3 partial reverse
+    for cand in candidates:
+        k = cand.lower().strip()
+        for col_l, col_a in lk.items():
+            if col_l in k:
+                return col_a
+    return None
+
+
+def n(s):
+    return pd.to_numeric(s, errors="coerce").fillna(0)
+
+
+def inr(v):
+    try:
+        f = float(v)
+        return "₹0.00" if (np.isnan(f) or np.isinf(f)) else f"₹{f:,.2f}"
+    except Exception:
+        return "₹0.00"
+
+
+def sv(v):
+    if v is None:
+        return ""
+    if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+        return ""
+    return v
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SESSION STATE
+# ═════════════════════════════════════════════════════════════════════════════
+
+FKEYS = ["base", "dealer", "vlds", "prev", "excl", "dfracd", "slab"]
+FLABELS = {
+    "base":   "Base Data",
+    "dealer": "4S Dealer List",
+    "vlds":   "VLDS Q4-2025 (Main sheet)",
+    "prev":   "VLDS Q4-2024 Summary",
+    "excl":   "Exclusion List",
+    "dfracd": "DF & RACD File",
+    "slab":   "Slab Table",
+}
+
+
+def init():
+    for k, v in [("quarter", "Q4 2024-25"), ("mode", "Quarterly"), ("done", False)]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+    for fk in FKEYS:
+        for suffix, default in [("raw", None), ("fname", ""), ("sheets", []),
+                                 ("sheet", ""), ("nrows", 0), ("cols", []), ("err", "")]:
+            key = f"{fk}_{suffix}"
+            if key not in st.session_state:
+                st.session_state[key] = default
+
+
+init()
+
+
+def n_loaded():
+    return sum(1 for fk in FKEYS if st.session_state[f"{fk}_raw"] is not None)
+
+
+def store(up, fk):
+    """Read uploaded file bytes immediately. Store bytes + metadata."""
+    try:
+        up.seek(0)
+        raw = up.read()
+        if not raw:
+            st.session_state[f"{fk}_err"] = "File is empty."
+            return
+        fname  = up.name
+        sheets = get_sheets(raw, fname)
+
+        # Auto-pick sheet
+        sheet = sheets[0] if sheets else ""
+        qid   = st.session_state.get("quarter", "").split()[0].upper()
+        if sheets:
+            for s in sheets:
+                sl = s.lower()
+                if fk == "vlds"   and "main" in sl:                          sheet = s; break
+                if fk == "prev"   and ("final" in sl or "summary" in sl):    sheet = s; break
+                if fk == "dfracd" and qid in s.upper():                      sheet = s; break
+
+        df = parse_bytes(raw, fname, sheet=sheet if sheet else 0)
+
+        st.session_state[f"{fk}_raw"]    = raw
+        st.session_state[f"{fk}_fname"]  = fname
+        st.session_state[f"{fk}_sheets"] = sheets
+        st.session_state[f"{fk}_sheet"]  = sheet
+        st.session_state[f"{fk}_nrows"]  = len(df)
+        st.session_state[f"{fk}_cols"]   = list(df.columns)
+        st.session_state[f"{fk}_err"]    = ""
+        st.session_state["done"]         = False
+    except Exception as e:
+        st.session_state[f"{fk}_err"] = str(e)
+
+
+def remove(fk):
+    for suffix, default in [("raw", None), ("fname", ""), ("sheets", []),
+                             ("sheet", ""), ("nrows", 0), ("cols", []), ("err", "")]:
+        st.session_state[f"{fk}_{suffix}"] = default
+    st.session_state["done"] = False
+
+
+def get(fk) -> pd.DataFrame:
+    raw   = st.session_state[f"{fk}_raw"]
+    fname = st.session_state[f"{fk}_fname"]
+    sheet = st.session_state[f"{fk}_sheet"]
+    if raw is None:
+        raise ValueError(f"{FLABELS[fk]} not uploaded.")
+    return parse_bytes(raw, fname, sheet=sheet if sheet else 0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REPORT GENERATOR  (defined first so it's always available)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def make_report(pivot: pd.DataFrame, summary: pd.DataFrame,
+                quarter: str, mode: str) -> io.BytesIO:
+
+    def clean(df):
+        df = df.copy()
+        for c in df.columns:
+            if df[c].dtype in (float, "float64", "float32"):
+                df[c] = df[c].replace([np.inf, -np.inf], np.nan).fillna(0)
+            else:
+                try:
+                    df[c] = df[c].fillna("")
+                except Exception:
+                    pass
+        return df
+
+    buf   = io.BytesIO()
+    label = f"{quarter} · {mode}"
+
+    with pd.ExcelWriter(buf, engine="xlsxwriter",
+                        engine_kwargs={"options": {"nan_inf_to_errors": True}}) as wr:
+        wb = wr.book
+
+        def F(**kw):
+            return wb.add_format({"font_name": "Calibri", "font_size": 9,
+                                  "border": 1, **kw})
+
+        T  = F(bold=True, font_size=13, font_color="FFFFFF", bg_color="0B1829",
+               align="center", valign="vcenter", border=0)
+        HB = F(bold=True, font_size=10, font_color="FFFFFF", bg_color="1A3F6F",
+               align="center", text_wrap=True)
+        HG = F(bold=True, font_size=10, font_color="FFFFFF", bg_color="1A7A4A",
+               align="center", text_wrap=True)
+        HD = F(bold=True, font_size=10, font_color="FFFFFF", bg_color="7B3F00",
+               align="center", text_wrap=True)
+        TE = F(bg_color="EBF3FB");  TO = F(bg_color="FFFFFF")
+        NE = F(bg_color="EBF3FB", num_format="#,##0.00")
+        NO = F(bg_color="FFFFFF",  num_format="#,##0.00")
+        PE = F(bg_color="EBF3FB", num_format="0.00")
+        PO = F(bg_color="FFFFFF",  num_format="0.00")
+        DE = F(bold=True, bg_color="E8F5E9", num_format="#,##0.00")
+        DO = F(bold=True, bg_color="F1FFF4", num_format="#,##0.00")
+        TN = F(bold=True, bg_color="0B1829", font_color="FFFFFF", num_format="#,##0.00")
+        TL = F(bold=True, bg_color="0B1829", font_color="FFFFFF")
+
+        # ── Pivot sheet ───────────────────────────────────────────────────
+        if not pivot.empty:
+            df  = clean(pivot)
+            ws  = wb.add_worksheet("Pivot")
+            wr.sheets["Pivot"] = ws
+            id_cols = [c for c in df.columns
+                       if any(k in str(c).lower()
+                              for k in ("customer", "name", "number", "zone"))
+                       and c != "Grand Total"]
+            mc = [c for c in df.columns if c not in id_cols and c != "Grand Total"]
+            ws.merge_range(0, 0, 0, len(df.columns) - 1,
+                           f"VLDS Pivot — Revenue by Customer × Month  |  {label}", T)
+            ws.set_row(0, 26)
+            for ci, c in enumerate(df.columns):
+                hf = HD if c == "Grand Total" else (HG if c in mc else HB)
+                ws.write(1, ci, str(c), hf)
+                ws.set_column(ci, ci, max(len(str(c)) + 4, 14))
+            ws.set_row(1, 22)
+            last = len(df) - 1
+            for ri, row in df.iterrows():
+                ev = ri % 2 == 0
+                is_tot = ri == last
+                for ci, c in enumerate(df.columns):
+                    v = sv(row[c])
+                    if is_tot:
+                        ws.write(ri + 2, ci, v, TL if c in id_cols else TN)
+                    elif c in mc or c == "Grand Total":
+                        ws.write(ri + 2, ci, v, NE if ev else NO)
+                    else:
+                        ws.write(ri + 2, ci, v, TE if ev else TO)
+            ws.freeze_panes(2, 0)
+
+        # ── Final Summary sheet ───────────────────────────────────────────
+        if not summary.empty:
+            df  = clean(summary)
+            ws  = wb.add_worksheet("Final Summary")
+            wr.sheets["Final Summary"] = ws
+            money = {"amount", "q4", "deducted", "increase"}
+            disc  = {"discount value"}
+            pct   = {"growth", "discount %"}
+            ws.merge_range(0, 0, 0, len(df.columns) - 1,
+                           f"VLDS Final Summary  |  {label}  |  "
+                           f"{datetime.now().strftime('%d %b %Y  %I:%M %p')}", T)
+            ws.set_row(0, 26)
+            for ci, c in enumerate(df.columns):
+                cl = c.lower()
+                hf = (HD if any(k in cl for k in disc) else
+                      HG if any(k in cl for k in money | pct) else HB)
+                ws.write(1, ci, c, hf)
+                ws.set_column(ci, ci, max(len(c) + 4, 14))
+            ws.set_row(1, 30)
+            last = len(df) - 1
+            for ri, row in df.iterrows():
+                ev = ri % 2 == 0
+                is_tot = ri == last
+                for ci, c in enumerate(df.columns):
+                    v  = sv(row[c])
+                    cl = c.lower()
+                    if is_tot:
+                        ws.write(ri + 2, ci, v,
+                                 TL if any(k in cl for k in ("name", "number", "zone", "slab"))
+                                 else TN)
+                    elif any(k in cl for k in disc):
+                        ws.write(ri + 2, ci, v, DE if ev else DO)
+                    elif any(k in cl for k in pct):
+                        ws.write(ri + 2, ci, v, PE if ev else PO)
+                    elif any(k in cl for k in money):
+                        ws.write(ri + 2, ci, v, NE if ev else NO)
+                    else:
+                        ws.write(ri + 2, ci, v, TE if ev else TO)
+            ws.freeze_panes(2, 2)
+
+    buf.seek(0)
+    return buf
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# UI HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def al(kind, title, body=""):
+    st.markdown(f'<div class="al {kind}"><b>{title}</b><p>{body}</p></div>',
+                unsafe_allow_html=True)
+
+
+def sec(t):
+    st.markdown(f'<div class="sec">{t}</div>', unsafe_allow_html=True)
+
+
+def kpi(icon, lbl, val, k=""):
+    return (f'<div class="kc {k}"><div style="font-size:15px;margin-bottom:3px">{icon}</div>'
+            f'<div class="kval">{val}</div><div class="klbl">{lbl}</div></div>')
+
+
+def file_card(fk, title, desc, upkey):
+    raw    = st.session_state[f"{fk}_raw"]
+    fname  = st.session_state[f"{fk}_fname"]
+    nrows  = st.session_state[f"{fk}_nrows"]
+    sheets = st.session_state[f"{fk}_sheets"]
+    sheet  = st.session_state[f"{fk}_sheet"]
+    err    = st.session_state[f"{fk}_err"]
+    loaded = raw is not None
+
+    cls   = "fc loaded" if loaded else ("fc errd" if err else "fc")
+    badge = ('<span class="fc-badge ok">✅ Loaded</span>' if loaded else
+             '<span class="fc-badge er">❌ Error</span>'  if err else
+             '<span class="fc-badge no">⬆ Upload</span>')
+    info  = ""
+    if loaded:
+        sh = f"  ·  Sheet: {sheet}" if sheet else ""
+        info = f'<div class="fc-info">📄 {fname}  ·  {nrows:,} rows{sh}</div>'
+    elif err:
+        info = f'<div style="font-size:10px;color:var(--red);margin-top:4px">⚠️ {err[:140]}</div>'
+
+    st.markdown(
+        f'<div class="{cls}">'
+        f'<div class="fc-row">'
+        f'<div><div class="fc-name">{title}</div><div class="fc-desc">{desc}</div></div>'
+        f'{badge}</div>{info}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not loaded:
+        up = st.file_uploader("", type=["xlsx", "xlsb", "xls", "csv"],
+                              key=upkey, label_visibility="collapsed")
+        if up is not None:
+            store(up, fk)
+            st.rerun()
+    else:
+        _, c2 = st.columns([4, 1])
+        with c2:
+            if st.button("Remove", key=f"rm_{fk}", use_container_width=True):
+                remove(fk)
+                st.rerun()
+        if sheets and len(sheets) > 1:
+            cur = sheet
+            try:
+                idx = sheets.index(cur)
+            except Exception:
+                idx = 0
+            chosen = st.selectbox(f"Sheet:", sheets, index=idx, key=f"sel_{fk}")
+            if chosen != cur:
+                st.session_state[f"{fk}_sheet"] = chosen
+                try:
+                    df2 = parse_bytes(raw, fname, sheet=chosen)
+                    st.session_state[f"{fk}_nrows"] = len(df2)
+                    st.session_state[f"{fk}_cols"]  = list(df2.columns)
+                except Exception:
+                    pass
+                st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# HEADER
+# ═════════════════════════════════════════════════════════════════════════════
+
+nl = n_loaded()
+sp = (f'<span class="pill g">✅ {nl}/7 Files Loaded</span>' if nl == 7 else
+      f'<span class="pill r">⚠️ {nl}/7 Loaded</span>'       if nl > 0  else
+      '<span class="pill">📂 Upload 7 Files Below</span>')
+dp = '<span class="pill g">📥 Results Ready</span>' if st.session_state["done"] else ""
+
+st.markdown(f"""
+<div class="hdr">
+  <div class="hdr-pre">Forest Dealerships · Internal Tool · Confidential</div>
+  <div class="hdr-title">VLDS Quarterly Incentive Process</div>
+  <div class="hdr-sub">Eligible Sales · Growth Analysis · Incentive Derivation</div>
+  <div class="pills">
+    <span class="pill gold">📅 {st.session_state['quarter']}</span>
+    <span class="pill">📊 {st.session_state['mode']}</span>
+    {sp} {dp}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CONFIGURE
+# ═════════════════════════════════════════════════════════════════════════════
+
+sec("⚙️  Configure")
+c1, c2, _ = st.columns([1, 1, 4])
+with c1:
+    q = st.selectbox("Quarter",
+                     ["Q4 2024-25", "Q3 2024-25", "Q2 2024-25", "Q1 2024-25", "Q4 2023-24"],
+                     key="q_sel")
+    st.session_state["quarter"] = q
+with c2:
+    m = st.selectbox("Mode", ["Quarterly", "Annual"], key="m_sel")
+    st.session_state["mode"] = m
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# UPLOAD — 7 FILES
+# ═════════════════════════════════════════════════════════════════════════════
+
+sec("📂  Upload All 7 Files")
+
+al("info", "What to upload — in order",
+   "1. Base Data  —  raw file from client (all customers, all regions)\n"
+   "2. 4S Dealer List  —  master list; used to filter base data to 4S only\n"
+   "3. VLDS Q4-2025  —  main working file; select the 'Main' sheet\n"
+   "4. VLDS Q4-2024 Summary  —  previous quarter; select 'Final Summary' sheet\n"
+   "5. Exclusion List  —  Sr.No · Particulars · Item No · Column Name\n"
+   "6. DF & RACD File  —  select the Q4 sheet (has 4 sheets, one per quarter)\n"
+   "7. Slab Table  —  Growth_From_% · Growth_To_% · Incentive_%")
+
+# Diagnostic: show column names already detected (helps if re-running)
+with st.expander("🔍  View column names detected in your files (open this first if you get 0 results)"):
+    st.markdown("These are the **exact column names** the app sees in each file after upload. "
+                "If a column is missing, this tells you what to fix.")
+    any_uploaded = False
+    for fk in FKEYS:
+        cols  = st.session_state.get(f"{fk}_cols", [])
+        fn    = st.session_state.get(f"{fk}_fname", "")
+        nrows = st.session_state.get(f"{fk}_nrows", 0)
+        if cols:
+            any_uploaded = True
+            st.markdown(f"**{FLABELS[fk]}** — `{fn}` ({nrows:,} rows)")
+            st.code(", ".join(str(c) for c in cols))
+    if not any_uploaded:
+        st.info("Upload files above — column names will appear here automatically.")
+
+st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+rA1, rA2 = st.columns(2)
+with rA1:
+    file_card("base",   "🗂  Base Data",
+              "Raw data from client · All customers · Filtered to 4S using Dealer List",
+              "up_base")
+with rA2:
+    file_card("dealer", "🏪  4S Dealer List",
+              "Master 4S dealer list · Customer Account Number column required",
+              "up_dealer")
+
+st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+rB1, rB2, rB3 = st.columns(3)
+with rB1:
+    file_card("vlds", "📁  VLDS Q4-2025",
+              "4-sheet file · Select 'Main' sheet\nHas LOB · Remarks · BD columns",
+              "up_vlds")
+with rB2:
+    file_card("prev", "📋  VLDS Q4-2024 Summary",
+              "Previous quarter · Select 'Final Summary' sheet\nNeeds Customer Number + Final Amount Q4-24",
+              "up_prev")
+with rB3:
+    file_card("excl", "🚫  Exclusion List",
+              "Sr.No · Particulars · Item No\nColumn Name (which column to check)",
+              "up_excl")
+
+st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+rC1, rC2 = st.columns(2)
+with rC1:
+    file_card("dfracd", "🔍  DF & RACD File",
+              "4 sheets (Q1/Q2/Q3/Q4) · Select Q4 sheet\nConcat key = Invoice No + Item + Revenue Amount",
+              "up_dfracd")
+with rC2:
+    file_card("slab", "📊  Slab Table",
+              "Growth_From_% · Growth_To_% · Incentive_%\nUpdate this file each quarter",
+              "up_slab")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RUN
+# ═════════════════════════════════════════════════════════════════════════════
+
+st.markdown("---")
+ready = n_loaded() == 7
+if not ready:
+    missing = [FLABELS[fk] for fk in FKEYS if st.session_state[f"{fk}_raw"] is None]
+    al("warn", f"{len(missing)} file(s) not yet loaded", "  ·  ".join(missing))
+
+_, bcol, _ = st.columns([1, 3, 1])
+with bcol:
+    run = st.button("🚀  Run VLDS Process", use_container_width=True, disabled=not ready)
+st.markdown("---")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PROCESSING
+# ═════════════════════════════════════════════════════════════════════════════
+
+if run and ready:
+    prog  = st.progress(0, "Reading files…")
+    errs  = []
+
+    def safe_get(fk):
+        try:
+            return get(fk)
+        except Exception as e:
+            errs.append(f"{FLABELS[fk]}: {e}")
+            return None
+
+    base_df   = safe_get("base")
+    dealer_df = safe_get("dealer")
+    vlds_df   = safe_get("vlds")
+    prev_df   = safe_get("prev")
+    excl_df   = safe_get("excl")
+    dfracd_df = safe_get("dfracd")
+    slab_df   = safe_get("slab")
+
+    if errs:
+        for e in errs:
+            al("err", "File read error", e)
+        st.stop()
+
+    # ── STEP 0: Filter 4S from base data ──────────────────────────────────
+    prog.progress(10, "Step 0 — Filtering 4S dealers…")
+
+    base_cno = fc(base_df,
+                  "customer account number", "customer_account_number",
+                  "customer number", "customer no", "cust no",
+                  "account number", "customeraccountnumber")
+    dealer_cno = fc(dealer_df,
+                    "customer account number", "customer_account_number",
+                    "customer number", "dealer number", "cust no",
+                    "customer no", "account number", "dealer no")
+
+    n_base  = len(base_df) if base_df is not None else 0
+    n_non4s = 0
+
+    if base_cno and dealer_cno and base_df is not None and dealer_df is not None:
+        base_df[base_cno]     = base_df[base_cno].astype(str).str.strip()
+        dealer_df[dealer_cno] = dealer_df[dealer_cno].astype(str).str.strip()
+        dealer_set = set(dealer_df[dealer_cno].dropna().tolist())
+        mask_4s    = base_df[base_cno].isin(dealer_set)
+        n_non4s    = int((~mask_4s).sum())
+
+    # ── Use VLDS Q4-2025 Main as working data ──────────────────────────────
+    # (Already 4S-filtered by client. Base data used only for non-4S count.)
+    if vlds_df is None or len(vlds_df) < 2:
+        al("err", "VLDS Q4-2025 main sheet has no data",
+           "Check the sheet selector — make sure 'Main' sheet is selected.")
+        st.stop()
+
+    # Store actual column names so the diagnostic can show them
+    st.session_state["vlds_cols"] = list(vlds_df.columns)
+
+    work = vlds_df.copy()
+    work["_excl"]   = False
+    work["_reason"] = ""
+
+    # Find key columns — show what was detected
+    lob_c = fc(work, "lob", "line of business", "lob_name")
+    rmk_c = fc(work, "remarks", "remark", "eligibility", "eligibility remarks",
+               "consider for vd", "remark column", "bd remarks")
+    amt_c = fc(work,
+               "revenue amount", "revenue_amount", "revenue amt",
+               "functional amount", "functional_amount",
+               "amount", "net amount", "sales amount",
+               "total sales", "invoice amount", "rev amount")
+    cno_c = fc(work,
+               "customer account number", "customer_account_number",
+               "customer number", "customer no", "cust no",
+               "account number", "customeraccountnumber")
+    cnm_c = fc(work,
+               "customer account name", "customer_account_name",
+               "customer name", "dealer name", "account name", "customername")
+    zon_c = fc(work, "zone", "territory", "region", "area", "zone name", "sales zone")
+    mon_c = fc(work,
+               "reporting fiscal month", "reporting fiscal month name",
+               "reporting_fiscal_month", "month", "cmi month",
+               "fiscal month", "period", "reporting month",
+               "cmi_month", "fiscal period", "month name")
+    bd_c  = fc(work, "bd", "concat key", "concat_key", "concatenation key",
+               "dfracd key", "df key", "concatkey", "unique key")
+    inv_c = fc(work, "invoice number", "invoice_number", "invoice no", "doc no", "invoice num")
+    itm_c = fc(work, "item", "item no", "item_no", "item number", "part no", "material")
+
+    detected = {
+        "LOB":            lob_c or "❌ NOT FOUND",
+        "Remarks":        rmk_c or "❌ NOT FOUND",
+        "Revenue Amount": amt_c or "❌ NOT FOUND",
+        "Customer No":    cno_c or "❌ NOT FOUND",
+        "Customer Name":  cnm_c or "❌ NOT FOUND",
+        "Zone":           zon_c or "❌ NOT FOUND",
+        "Month":          mon_c or "❌ NOT FOUND",
+        "BD (concat)":    bd_c  or "❌ NOT FOUND",
+    }
+    st.session_state["detected"] = detected
+
+    # ── STEP 1: LOB filter ─────────────────────────────────────────────────
+    prog.progress(22, "Step 1 — LOB filter…")
+
+    bad_lobs = {"CBD", "ENGINE", "NEW ENGINE", "REBUILD", "SOLUTIONS", "SOLUTION"}
+
+    if lob_c:
+        try:
+            lob_u = work[lob_c].astype(str).str.strip().str.upper()
+            bad   = (lob_u.isin(bad_lobs) |
+                     ((lob_u != "PARTS") & lob_u.ne("") & lob_u.ne("NAN") & lob_u.ne("NONE")))
+            work.loc[bad & ~work["_excl"], "_reason"] = "LOB: " + work.loc[bad, lob_c].astype(str)
+            work.loc[bad, "_excl"] = True
+        except Exception:
+            pass
+
+    if rmk_c:
+        try:
+            rmk   = work[rmk_c].astype(str).str.strip()
+            bad_r = (rmk.str.upper().str.startswith("NO ") |
+                     rmk.str.upper().isin(["VLDS NOT APPLICABLE", "NOT APPLICABLE", "VLDS NA"]))
+            new_b = bad_r & ~work["_excl"]
+            work.loc[new_b, "_reason"] = "Remarks: " + work.loc[new_b, rmk_c].astype(str)
+            work.loc[bad_r, "_excl"] = True
+        except Exception:
+            pass
+
+    # ── STEP 2: Exclusion list ─────────────────────────────────────────────
+    prog.progress(40, "Step 2 — Exclusion list…")
+
+    if excl_df is not None and not excl_df.empty:
+        ecols = list(excl_df.columns)
+        p_col = (fc(excl_df, "particulars", "particular", "criteria", "value", "description")
+                 or (ecols[1] if len(ecols) > 1 else None))
+        i_col = (fc(excl_df,
+                    "item no", "item no.", "item_no", "item number",
+                    "item no (only if applicable otherwise na)",
+                    "item no.(na if not applied)",
+                    "item no. (na if not applicable)")
+                 or (ecols[2] if len(ecols) > 2 else None))
+        c_col = (fc(excl_df,
+                    "column name", "column on which we check particulars",
+                    "on which column the particulars are applied",
+                    "column", "apply to", "check in column")
+                 or (ecols[3] if len(ecols) > 3 else None))
+
+        for _, row in excl_df.iterrows():
+            part = str(row[p_col]).strip() if p_col else ""
+            if not part or part.upper() in ("NAN", "NONE", "", "N/A", "NA", "-",
+                                            "SR. NO.", "PARTICULARS", "SR NO"):
+                continue
+
+            item_no  = str(row[i_col]).strip() if i_col else "NA"
+            col_name = str(row[c_col]).strip()  if c_col else ""
+
+            # Find target column in work
+            tgt = None
+            if col_name and col_name.upper() not in ("NAN", "NONE", "", "-"):
+                tgt = fc(work, col_name)
+                if not tgt:
+                    for wc in work.columns:
+                        if col_name.lower() in wc.lower():
+                            tgt = wc
+                            break
+            if not tgt:
+                tgt = fc(work, "line item", "inventory item description",
+                         "item description", "description")
+
+            if tgt:
+                s    = work[tgt].astype(str).str.upper()
+                mask = s.str.contains(part.upper(), na=False, regex=False)
+                work.loc[mask & ~work["_excl"], "_reason"] = f"Excl: {part}"
+                work.loc[mask, "_excl"] = True
+
+            # Also check item number column
+            if item_no.upper() not in ("NA", "N/A", "NAN", "NONE", "", "-"):
+                if itm_c:
+                    s2   = work[itm_c].astype(str).str.strip().str.upper()
+                    msk2 = (s2 == item_no.upper()) | s2.str.startswith(item_no.upper())
+                    work.loc[msk2 & ~work["_excl"], "_reason"] = f"Excl: {part} (Item: {item_no})"
+                    work.loc[msk2, "_excl"] = True
+
+    # ── STEP 3: DF/RACD ────────────────────────────────────────────────────
+    prog.progress(58, "Step 3 — DF/RACD exclusions…")
+
+    if dfracd_df is not None and not dfracd_df.empty:
+        dkeys = set()
+
+        # Pre-built BD column in DF/RACD file
+        dbd = fc(dfracd_df, "bd", "concat key", "concat_key", "key",
+                 "concatenation key", "dfracd key", "concatkey", "unique key")
+        if dbd:
+            dkeys |= set(dfracd_df[dbd].astype(str).str.strip())
+
+        # Build from raw DF/RACD columns
+        d_inv = fc(dfracd_df, "invoice number", "invoice_number", "invoice no", "doc no")
+        d_itm = fc(dfracd_df, "item", "item no", "item_no", "item number", "part no", "material")
+        d_amt = fc(dfracd_df, "revenue amount", "revenue_amount", "amount", "functional amount")
+        if d_inv and d_itm and d_amt:
+            built = (dfracd_df[d_inv].astype(str).str.strip() + "|" +
+                     dfracd_df[d_itm].astype(str).str.strip() + "|" +
+                     n(dfracd_df[d_amt]).astype(str))
+            dkeys |= set(built.tolist())
+        elif d_inv:
+            dkeys |= set(dfracd_df[d_inv].astype(str).str.strip())
+
+        dkeys.discard("nan")
+        dkeys.discard("")
+        dkeys.discard("nan|nan|0.0")
+
+        # Match BD column in main file
+        if bd_c and dkeys:
+            try:
+                bd_vals = work[bd_c].astype(str).str.strip()
+                mask_bd = bd_vals.isin(dkeys)
+                work.loc[mask_bd & ~work["_excl"], "_reason"] = "DF/RACD (BD)"
+                work.loc[mask_bd, "_excl"] = True
+            except Exception:
+                pass
+
+        # Build and match our own concat key
+        if inv_c and itm_c and amt_c and dkeys:
+            try:
+                own = (work[inv_c].astype(str).str.strip() + "|" +
+                       work[itm_c].astype(str).str.strip() + "|" +
+                       n(work[amt_c]).astype(str))
+                mask_own = own.isin(dkeys)
+                work.loc[mask_own & ~work["_excl"], "_reason"] = "DF/RACD (concat)"
+                work.loc[mask_own, "_excl"] = True
+            except Exception:
+                pass
+
+        # Remarks flag
+        if rmk_c:
+            try:
+                rmk2     = work[rmk_c].astype(str).str.upper()
+                mask_rmk = rmk2.str.contains(r"NO\s*DF|NO\s*RACD", na=False, regex=True)
+                work.loc[mask_rmk & ~work["_excl"], "_reason"] = "DF/RACD (Remarks)"
+                work.loc[mask_rmk, "_excl"] = True
+            except Exception:
+                pass
+
+    # ── Split ──────────────────────────────────────────────────────────────
+    eligible = work[~work["_excl"]].copy()
+    excluded = work[ work["_excl"]].copy()
+
+    prog.progress(72, "Building pivot…")
+
+    # ── Pivot ──────────────────────────────────────────────────────────────
+    pivot_df = pd.DataFrame()
+    if cno_c and amt_c and not eligible.empty:
+        el = eligible.copy()
+        el[amt_c] = n(el[amt_c])
+        ids = [c for c in [cnm_c, cno_c, zon_c] if c]
+        if mon_c:
+            piv = el.pivot_table(index=ids, columns=mon_c, values=amt_c,
+                                 aggfunc="sum", fill_value=0).reset_index()
+            piv.columns.name = None
+            mc_cols = sorted([c for c in piv.columns if c not in ids], key=str)
+            piv["Grand Total"] = piv[mc_cols].sum(axis=1)
+            piv = piv[ids + mc_cols + ["Grand Total"]]
+        else:
+            piv = el.groupby(ids, dropna=False)[amt_c].sum().reset_index()
+            piv.rename(columns={amt_c: "Grand Total"}, inplace=True)
+        piv = piv.sort_values("Grand Total", ascending=False).reset_index(drop=True)
+        tot_row = {c: (n(piv[c]).sum() if c not in ids
+                       else ("Grand Total" if c == ids[0] else ""))
+                   for c in piv.columns}
+        pivot_df = pd.concat([piv, pd.DataFrame([tot_row])], ignore_index=True)
+
+    prog.progress(86, "Building final summary…")
+
+    # ── Final Summary ──────────────────────────────────────────────────────
+    summary_df = pd.DataFrame()
+    if cno_c and amt_c and not eligible.empty:
+        el2 = eligible.copy()
+        el2[amt_c] = n(el2[amt_c])
+        el2[cno_c] = el2[cno_c].astype(str).str.strip()
+
+        agg = {amt_c: "sum"}
+        if cnm_c: agg[cnm_c] = "first"
+        if zon_c: agg[zon_c] = "first"
+        cur = el2.groupby(cno_c).agg(agg).reset_index()
+        cur.rename(columns={
+            cno_c: "Customer Number",
+            amt_c: "Final Amount Q4-25",
+            **({cnm_c: "Customer Name"} if cnm_c else {}),
+            **({zon_c: "Zone"}          if zon_c else {}),
+        }, inplace=True)
+        cur["Customer Number"] = cur["Customer Number"].astype(str)
+
+        # Deducted (exclusion-list rows only, not DF/RACD)
+        deducted = pd.Series(dtype=float)
+        x_cno = fc(excluded, "customer account number", "customer number", "cust no")
+        x_amt = fc(excluded, "revenue amount", "revenue_amount", "amount", "functional amount")
+        if x_cno and x_amt and not excluded.empty:
+            ex = excluded.copy()
+            ex[x_amt] = n(ex[x_amt])
+            ex[x_cno] = ex[x_cno].astype(str).str.strip()
+            sub = ex[~ex["_reason"].str.contains("DF/RACD", na=False)]
+            deducted = sub.groupby(x_cno)[x_amt].sum().abs()
+            deducted.index = deducted.index.astype(str)
+        cur["Deducted as per Exclusion List"] = cur["Customer Number"].map(deducted).fillna(0)
+
+        # Q4-24 previous quarter
+        cur["Q4-24"] = 0.0
+        if prev_df is not None and not prev_df.empty:
+            p_cno = fc(prev_df,
+                       "customer number", "customer account number",
+                       "customer no", "cust no", "customer_number",
+                       "customer_account_number", "customeraccountnumber")
+            p_amt = fc(prev_df,
+                       "final amount q4-24", "final amount q4 24",
+                       "final_amount_q4_24", "final amount",
+                       "eligible sales", "eligible_sales",
+                       "q4-24", "q4 24", "amount", "revenue amount", "sales")
+            if p_cno and p_amt:
+                prev_df[p_amt] = n(prev_df[p_amt])
+                prev_df[p_cno] = prev_df[p_cno].astype(str).str.strip()
+                cur["Q4-24"] = cur["Customer Number"].map(
+                    prev_df.set_index(p_cno)[p_amt].to_dict()).fillna(0)
+        cur["Final Amount Q4-24"] = cur["Q4-24"]
+
+        # SOP formulas
+        cur["Increase"] = cur["Final Amount Q4-25"] - cur["Final Amount Q4-24"]
+        cur["Growth"]   = cur.apply(
+            lambda r: r["Increase"] / r["Final Amount Q4-24"]
+                      if r["Final Amount Q4-24"] != 0 else None, axis=1)
+
+        # Slab
+        def get_slab(g):
+            if g is None or (isinstance(g, float) and (np.isnan(g) or np.isinf(g))):
+                return 0.0, "No Q4-24 data"
+            gp = g * 100
+            if slab_df is not None and not slab_df.empty:
+                s_from = fc(slab_df, "growth_from_%", "growth from %", "growth from",
+                            "from %", "from", "lower", "min growth", "min")
+                s_to   = fc(slab_df, "growth_to_%",   "growth to %",   "growth to",
+                            "to %",   "to",   "upper", "max growth", "max")
+                s_rate = fc(slab_df, "incentive_%", "incentive %", "incentive",
+                            "discount %", "rate %", "rate", "slab %", "slab rate")
+                s_name = fc(slab_df, "slab", "slab name", "slab label")
+                if s_from and s_to and s_rate:
+                    for _, row in slab_df.iterrows():
+                        try:
+                            if float(row[s_from]) <= gp < float(row[s_to]):
+                                nm = str(row[s_name]) if s_name else ""
+                                return float(row[s_rate]), nm
+                        except Exception:
+                            continue
+            return 0.0, "Below minimum"
+
+        cur[["Discount %", "Slab"]] = cur["Growth"].apply(
+            lambda g: pd.Series(get_slab(g)))
+        cur["Discount Value"] = (cur["Final Amount Q4-25"] * cur["Discount %"] / 100).round(2)
+
+        order = ["Customer Name", "Zone", "Customer Number",
+                 "Final Amount Q4-25", "Q4-24",
+                 "Deducted as per Exclusion List",
+                 "Final Amount Q4-24", "Increase",
+                 "Growth", "Discount %", "Slab", "Discount Value"]
+        order = [c for c in order if c in cur.columns]
+        out   = cur[order].sort_values("Final Amount Q4-25", ascending=False)
+
+        money_k = {"amount", "q4", "deducted", "increase", "discount value"}
+        tot_row = {c: (pd.to_numeric(out[c], errors="coerce").sum()
+                       if any(k in c.lower() for k in money_k)
+                       else ("TOTAL" if c in ("Customer Name", "Customer Number") else ""))
+                   for c in out.columns}
+        summary_df = pd.concat([out, pd.DataFrame([tot_row])],
+                               ignore_index=True).reset_index(drop=True)
+
+    prog.progress(100, "✅  Done!")
+
+    st.session_state.update({
+        "done":       True,
+        "eligible":   eligible,
+        "excluded":   excluded,
+        "pivot_df":   pivot_df,
+        "summary_df": summary_df,
+        "n_base":     n_base,
+        "n_non4s":    n_non4s,
+        "n_work":     len(vlds_df),
+    })
+    st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RESULTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.get("done"):
+    eligible   = st.session_state["eligible"]
+    excluded   = st.session_state["excluded"]
+    pivot_df   = st.session_state["pivot_df"]
+    summary_df = st.session_state["summary_df"]
+    n_base     = st.session_state.get("n_base",  0)
+    n_non4s    = st.session_state.get("n_non4s", 0)
+    n_work     = st.session_state.get("n_work",  0)
+    quarter    = st.session_state["quarter"]
+    mode       = st.session_state["mode"]
+    detected   = st.session_state.get("detected", {})
+
+    sec("📊  Results")
+
+    # ── Column detection report ────────────────────────────────────────────
+    missing_c = [k for k, v in detected.items() if "NOT FOUND" in str(v)]
+    if missing_c or len(eligible) == 0:
+        with st.expander("⚠️  Column Detection Report — open to diagnose 0 results",
+                         expanded=True):
+            ca, cb = st.columns(2)
+            with ca:
+                st.markdown("**Columns detected in VLDS Q4-2025:**")
+                for k, v in detected.items():
+                    icon = "✅" if "NOT FOUND" not in str(v) else "❌"
+                    st.markdown(f"{icon} **{k}:** `{v}`")
+            with cb:
+                st.markdown("**All columns actually found in your VLDS Q4-2025 file:**")
+                vlds_cols = st.session_state.get("vlds_cols", [])
+                if vlds_cols:
+                    st.code("\n".join(str(c) for c in vlds_cols))
+                else:
+                    # Try to show from session cols
+                    vlds_cols2 = st.session_state.get("vlds_cols", [])
+                    if vlds_cols2:
+                        st.code("\n".join(str(c) for c in vlds_cols2))
+                    else:
+                        st.warning("Upload the VLDS Q4-2025 file first, then run again.")
+            if missing_c:
+                st.error(
+                    f"These columns were NOT found: {', '.join(missing_c)}\n\n"
+                    "Share the column names shown above and the issue will be fixed immediately."
+                )
+
+    al("ok", "✅  Process completed",
+       f"Quarter: {quarter}  ·  Mode: {mode}  ·  "
+       f"{len(eligible):,} eligible  ·  {len(excluded):,} excluded")
+
+    amt_e     = fc(eligible, "revenue amount", "revenue_amount", "amount",
+                   "functional amount", "total sales") if not eligible.empty else None
+    elig_sales = n(eligible[amt_e]).sum() if amt_e and not eligible.empty else 0
+    disc_total = (pd.to_numeric(summary_df.get("Discount Value", pd.Series(dtype=float)),
+                                errors="coerce").sum()
+                  if "Discount Value" in summary_df.columns else 0)
+    dfracd_n  = int(excluded["_reason"].str.contains("DF/RACD", na=False).sum()
+                    ) if not excluded.empty else 0
+    crit_n    = len(excluded) - dfracd_n
+
+    st.markdown(f"""<div class="krow">
+      {kpi("📋","Base Records",   f"{n_base:,}",        "")}
+      {kpi("🏪","Non-4S Removed", f"{n_non4s:,}",       "r")}
+      {kpi("📁","VLDS Main Rows", f"{n_work:,}",        "")}
+      {kpi("✅","Eligible",       f"{len(eligible):,}", "g")}
+      {kpi("🚫","Criteria Excl.", f"{crit_n:,}",        "r")}
+      {kpi("🔍","DF/RACD Excl.", f"{dfracd_n:,}",       "r")}
+      {kpi("💰","Eligible Sales", inr(elig_sales),      "a")}
+      {kpi("🏷️","Total Discount", inr(disc_total),      "a")}
+    </div>""", unsafe_allow_html=True)
+
+    t1, t2, t3, t4 = st.tabs([
+        "📈 Final Summary", "📊 Pivot",
+        "🚫 Excluded Records", "✅ Eligible Data",
+    ])
+
+    with t1:
+        if summary_df.empty:
+            al("warn", "No summary data",
+               "Revenue Amount and/or Customer Account Number column not found.\n"
+               "Open the 'Column Detection Report' above to see which columns are missing.")
+        else:
+            srch = st.text_input("🔎 Search dealer",
+                                 placeholder="Name or number…", key="s1")
+            disp = summary_df.copy()
+            if srch:
+                msk = pd.Series(False, index=disp.index)
+                for c in disp.columns:
+                    msk |= disp[c].astype(str).str.contains(srch, case=False, na=False)
+                disp = disp[msk]
+            for c in disp.columns:
+                cl = c.lower()
+                if any(k in cl for k in ("amount","q4","deducted","increase","discount value")):
+                    disp[c] = disp[c].apply(
+                        lambda x: inr(x) if isinstance(x, (int, float)) else x)
+                elif "growth" in cl and "value" not in cl:
+                    disp[c] = disp[c].apply(
+                        lambda x: f"{float(x)*100:.2f}%"
+                        if isinstance(x, (int, float)) and not
+                        (isinstance(x, float) and (np.isnan(x) or np.isinf(x)))
+                        else "N/A")
+                elif "discount %" in cl:
+                    disp[c] = disp[c].apply(
+                        lambda x: f"{x:.2f}%" if isinstance(x, (int, float)) else "—")
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+            st.caption(f"{len(disp)} rows")
+
+    with t2:
+        if pivot_df.empty:
+            al("warn", "Pivot empty",
+               "Either no eligible records, or 'Reporting Fiscal Month'/'Month' "
+               "column not found in VLDS Q4-2025 file.\n"
+               "Open Column Detection Report above.")
+        else:
+            st.dataframe(pivot_df, use_container_width=True, hide_index=True)
+            st.caption(f"{max(0,len(pivot_df)-1)} dealers + Grand Total")
+
+    with t3:
+        if excluded.empty:
+            al("info", "No excluded records.")
+        else:
+            grp = excluded["_reason"].value_counts().reset_index()
+            grp.columns = ["Exclusion Reason", "Count"]
+            ca, cb = st.columns([1, 2])
+            with ca:
+                st.dataframe(grp, use_container_width=True, hide_index=True)
+            with cb:
+                vis = [c for c in excluded.columns if not c.startswith("_")]
+                st.dataframe(excluded[vis].head(500).reset_index(drop=True),
+                             use_container_width=True, hide_index=True)
+
+    with t4:
+        if eligible.empty:
+            al("warn", "No eligible records.")
+        else:
+            vis = [c for c in eligible.columns if not c.startswith("_")]
+            st.dataframe(eligible[vis].head(500).reset_index(drop=True),
+                         use_container_width=True, hide_index=True)
+            st.caption(f"{len(eligible):,} total eligible records")
+
+    # ── DOWNLOAD ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    sec("📥  Download Report")
+    al("info", "Report: 2 sheets",
+       "Sheet 1 — Pivot: Revenue Amount by Customer × Month\n"
+       "Sheet 2 — Final Summary: Customer Name · Zone · Customer Number · "
+       "Final Amount Q4-25 · Q4-24 · Deducted as per Exclusion List · "
+       "Final Amount Q4-24 · Increase · Growth · Discount % · Discount Value")
+
+    _, dc, _ = st.columns([1, 2, 1])
+    with dc:
+        try:
+            buf   = make_report(pivot_df, summary_df, quarter, mode)
+            fname = (f"VLDS_{quarter.replace(' ','_').replace('/','_')}"
+                     f"_{mode}.xlsx")
+            st.download_button(
+                f"⬇️  Download  {fname}",
+                data=buf, file_name=fname,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except Exception as e:
+            al("err", "Report generation error", str(e))
+
+st.markdown("""
+<div style="text-align:center;padding:20px 0 10px;color:#94A3B8;
+  font-size:11px;letter-spacing:.4px;">
+VLDS Process · Forest Dealerships · Confidential
+</div>""", unsafe_allow_html=True)
