@@ -1,1 +1,606 @@
 
+"""
+VLDS Quarterly Incentive Process
+Run: python -m streamlit run app.py
+"""
+import io
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from modules.reader import get_sheet_names, read_file
+from modules.engine import (
+    filter_4s, apply_lob_filter, apply_exclusions,
+    apply_dfracd, split, build_pivot, build_summary,
+    fc, num, inr,
+)
+from modules.report import generate
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(page_title="VLDS Process", page_icon="📊",
+                   layout="wide", initial_sidebar_state="collapsed")
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Playfair+Display:wght@600&display=swap');
+:root{--navy:#0C1E35;--blue:#163354;--acc:#1D5FAC;--gold:#C9952A;
+  --amber:#F5C842;--green:#1A7A4A;--red:#C0392B;--bg:#EEF2F7;
+  --card:#fff;--border:#D4DCE8;--muted:#6B7A96;}
+html,body,[class*="css"]{font-family:'Outfit',sans-serif;background:var(--bg);color:var(--navy);}
+#MainMenu,footer,header,.stDeployButton{visibility:hidden;display:none;}
+.hdr{background:linear-gradient(120deg,#0C1E35,#163354 55%,#1D5FAC);
+  border-radius:16px;padding:28px 36px 24px;margin-bottom:20px;
+  box-shadow:0 8px 28px rgba(12,30,53,.22);position:relative;overflow:hidden;}
+.hdr::before{content:'';position:absolute;top:-50px;right:-30px;width:200px;height:200px;
+  border-radius:50%;background:radial-gradient(circle,rgba(245,200,66,.16),transparent 65%);}
+.hdr-pre{font-size:10px;letter-spacing:4px;text-transform:uppercase;
+  color:var(--amber);font-weight:700;margin-bottom:8px;}
+.hdr-title{font-family:'Playfair Display',serif;font-size:1.85rem;color:#fff;margin:0 0 5px;}
+.hdr-sub{color:rgba(255,255,255,.45);font-size:13px;margin:0;}
+.pills{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;}
+.pill{display:inline-flex;align-items:center;background:rgba(255,255,255,.1);
+  border:1px solid rgba(255,255,255,.18);border-radius:18px;padding:4px 12px;
+  font-size:11px;color:rgba(255,255,255,.82);font-weight:600;}
+.pill.gold{background:rgba(201,149,42,.22);border-color:rgba(201,149,42,.5);color:var(--amber);}
+.pill.g{background:rgba(26,122,74,.22);border-color:rgba(26,122,74,.5);color:#6EE7A7;}
+.pill.r{background:rgba(192,57,43,.22);border-color:rgba(192,57,43,.4);color:#FCA5A5;}
+.sec{font-family:'Playfair Display',serif;font-size:.92rem;color:var(--navy);
+  font-weight:600;display:flex;align-items:center;gap:9px;margin:20px 0 10px;}
+.sec::after{content:'';flex:1;height:1px;background:linear-gradient(to right,var(--border),transparent);}
+.fc{border-radius:12px;padding:12px 14px 8px;margin-bottom:3px;
+  border:2px dashed var(--border);background:var(--card);}
+.fc.ok{border-style:solid;border-color:#22C55E;background:#F0FDF4;}
+.fc.er{border-style:solid;border-color:var(--red);background:#FEF2F2;}
+.fc-row{display:flex;justify-content:space-between;align-items:flex-start;}
+.fc-name{font-size:12px;font-weight:700;color:var(--navy);}
+.fc-desc{font-size:10px;color:var(--muted);margin-top:2px;line-height:1.4;}
+.fc-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;}
+.b-ok{color:#16A34A;background:#DCFCE7;}
+.b-no{color:var(--muted);background:#F1F5F9;}
+.b-er{color:var(--red);background:#FEF2F2;}
+.fc-info{font-size:10px;color:var(--acc);margin-top:4px;}
+.krow{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;}
+.kc{background:var(--card);border-radius:11px;padding:14px 17px;flex:1;min-width:100px;
+  border:1px solid var(--border);border-top:3px solid var(--acc);}
+.kc.g{border-top-color:var(--green);}
+.kc.r{border-top-color:var(--red);}
+.kc.a{border-top-color:var(--gold);}
+.kval{font-size:1.35rem;font-weight:800;color:var(--navy);line-height:1;}
+.klbl{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;
+  letter-spacing:.5px;margin-top:4px;}
+.al{border-radius:9px;padding:10px 13px;margin:5px 0;font-size:12px;line-height:1.6;}
+.al b{display:block;font-size:13px;margin-bottom:2px;}
+.al p{margin:0;white-space:pre-line;}
+.al.ok{background:#F0FDF6;border:1px solid #86EFAC;border-left:4px solid var(--green);}
+.al.err{background:#FEF2F2;border:1px solid #FCA5A5;border-left:4px solid var(--red);}
+.al.warn{background:#FFFBEB;border:1px solid #FDE68A;border-left:4px solid var(--gold);}
+.al.info{background:#EFF6FF;border:1px solid #93C5FD;border-left:4px solid var(--acc);}
+.stButton>button{background:linear-gradient(135deg,#0C1E35,#163354)!important;
+  color:#fff!important;border:none!important;border-radius:9px!important;
+  font-weight:700!important;font-size:14px!important;padding:11px 22px!important;
+  box-shadow:0 4px 12px rgba(12,30,53,.2)!important;transition:all .18s!important;}
+.stButton>button:hover{transform:translateY(-1px)!important;}
+.stButton>button:disabled{opacity:.4!important;transform:none!important;}
+.stDownloadButton>button{background:linear-gradient(135deg,#1A7A4A,#15803D)!important;
+  color:#fff!important;border:none!important;border-radius:9px!important;
+  font-weight:700!important;font-size:15px!important;padding:12px 22px!important;width:100%!important;}
+.stTabs [data-baseweb="tab"]{font-weight:700!important;}
+hr{border-color:var(--border)!important;margin:16px 0!important;}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def al(kind, title, body=""):
+    st.markdown(f'<div class="al {kind}"><b>{title}</b><p>{body}</p></div>',
+                unsafe_allow_html=True)
+
+def sec(t):
+    st.markdown(f'<div class="sec">{t}</div>', unsafe_allow_html=True)
+
+def kpi(icon, lbl, val, k=""):
+    return (f'<div class="kc {k}"><div style="font-size:14px;margin-bottom:3px">{icon}</div>'
+            f'<div class="kval">{val}</div><div class="klbl">{lbl}</div></div>')
+
+def safe_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert to str if Arrow serialization would fail."""
+    try:
+        import pyarrow as pa
+        pa.Table.from_pandas(df)
+        return df
+    except Exception:
+        return df.astype(str)
+
+
+# ── Session state ─────────────────────────────────────────────────────────────
+
+FKEYS  = ["base","dealer","vlds","prev","excl","dfracd","slab"]
+FLABEL = {
+    "base":   "Base Data",
+    "dealer": "4S Dealer List",
+    "vlds":   "VLDS Q4-2025",
+    "prev":   "VLDS Q4-2024 Summary",
+    "excl":   "Exclusion List",
+    "dfracd": "DF & RACD File",
+    "slab":   "Slab Table",
+}
+
+
+def _init():
+    for k, v in [("quarter","Q4 2024-25"), ("mode","Quarterly"), ("done",False)]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+    for fk in FKEYS:
+        for s, d in [("raw",None),("fname",""),("sheets",[]),
+                     ("sheet",""),("nrows",0),("cols",[]),("err","")]:
+            if f"{fk}_{s}" not in st.session_state:
+                st.session_state[f"{fk}_{s}"] = d
+
+_init()
+
+
+def n_loaded():
+    return sum(1 for fk in FKEYS if st.session_state[f"{fk}_raw"] is not None)
+
+
+def _store(up, fk: str):
+    """Read uploaded file bytes immediately. Never store the file object."""
+    try:
+        up.seek(0)
+        raw = up.read()
+        if not raw:
+            st.session_state[f"{fk}_err"] = "File is empty."
+            return
+        fname  = up.name
+        sheets = get_sheet_names(raw, fname)
+
+        # Auto-pick sheet
+        sheet = sheets[0] if sheets else ""
+        qid   = st.session_state.get("quarter","").split()[0].upper()
+        if sheets:
+            for s in sheets:
+                sl = s.lower()
+                if fk == "vlds"   and "main"   in sl: sheet = s; break
+                if fk == "prev"   and ("final" in sl or "summary" in sl): sheet = s; break
+                if fk == "dfracd" and qid       in s.upper(): sheet = s; break
+                if fk == "dealer" and "sheet1"  in sl: sheet = s; break
+
+        df = read_file(raw, fname, sheet if sheet else 0)
+
+        st.session_state[f"{fk}_raw"]    = raw
+        st.session_state[f"{fk}_fname"]  = fname
+        st.session_state[f"{fk}_sheets"] = sheets
+        st.session_state[f"{fk}_sheet"]  = sheet
+        st.session_state[f"{fk}_nrows"]  = len(df)
+        st.session_state[f"{fk}_cols"]   = list(df.columns)
+        st.session_state[f"{fk}_err"]    = ""
+        st.session_state["done"]         = False
+    except Exception as e:
+        st.session_state[f"{fk}_err"] = str(e)[:200]
+
+
+def _drop(fk: str):
+    for s, d in [("raw",None),("fname",""),("sheets",[]),
+                 ("sheet",""),("nrows",0),("cols",[]),("err","")]:
+        st.session_state[f"{fk}_{s}"] = d
+    st.session_state["done"] = False
+
+
+def _load(fk: str) -> pd.DataFrame:
+    raw   = st.session_state[f"{fk}_raw"]
+    fname = st.session_state[f"{fk}_fname"]
+    sheet = st.session_state[f"{fk}_sheet"]
+    if raw is None:
+        raise ValueError(f"{FLABEL[fk]} not uploaded.")
+    return read_file(raw, fname, sheet if sheet else 0)
+
+
+def _file_card(fk, title, desc, upkey):
+    raw    = st.session_state[f"{fk}_raw"]
+    fname  = st.session_state[f"{fk}_fname"]
+    nrows  = st.session_state[f"{fk}_nrows"]
+    sheets = st.session_state[f"{fk}_sheets"]
+    sheet  = st.session_state[f"{fk}_sheet"]
+    err    = st.session_state[f"{fk}_err"]
+    loaded = raw is not None
+
+    cls   = "fc ok" if loaded else ("fc er" if err else "fc")
+    badge = (f'<span class="fc-badge b-ok">✅ {nrows:,} rows</span>' if loaded else
+             f'<span class="fc-badge b-er">❌ Error</span>'           if err else
+             f'<span class="fc-badge b-no">⬆ Upload</span>')
+    info  = ""
+    if loaded:
+        sh = f"  ·  Sheet: <b>{sheet}</b>" if sheet else ""
+        info = f'<div class="fc-info">📄 {fname}{sh}</div>'
+    elif err:
+        info = (f'<div style="font-size:10px;color:var(--red);margin-top:4px">'
+                f'⚠️ {err[:150]}</div>')
+
+    st.markdown(
+        f'<div class="{cls}"><div class="fc-row">'
+        f'<div><div class="fc-name">{title}</div>'
+        f'<div class="fc-desc">{desc}</div></div>'
+        f'{badge}</div>{info}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not loaded:
+        up = st.file_uploader("", type=["xlsx","xlsb","xls","csv"],
+                              key=upkey, label_visibility="collapsed")
+        if up is not None:
+            with st.spinner(f"Reading {up.name}…"):
+                _store(up, fk)
+            st.rerun()
+    else:
+        _, c2 = st.columns([4,1])
+        with c2:
+            if st.button("Remove", key=f"rm_{fk}", use_container_width=True):
+                _drop(fk); st.rerun()
+        if sheets and len(sheets) > 1:
+            cur = sheet
+            try:   idx = sheets.index(cur)
+            except Exception: idx = 0
+            chosen = st.selectbox("Sheet:", sheets, index=idx, key=f"sel_{fk}")
+            if chosen != cur:
+                st.session_state[f"{fk}_sheet"] = chosen
+                try:
+                    df2 = read_file(raw, fname, chosen)
+                    st.session_state[f"{fk}_nrows"] = len(df2)
+                    st.session_state[f"{fk}_cols"]  = list(df2.columns)
+                except Exception:
+                    pass
+                st.rerun()
+
+
+# ── HEADER ────────────────────────────────────────────────────────────────────
+
+nl = n_loaded()
+sp = (f'<span class="pill g">✅ {nl}/7 Loaded</span>' if nl == 7 else
+      f'<span class="pill r">⚠️ {nl}/7 Loaded</span>'  if nl > 0  else
+      '<span class="pill">📂 Upload 7 Files</span>')
+dp = '<span class="pill g">📥 Results Ready</span>' if st.session_state["done"] else ""
+
+st.markdown(f"""
+<div class="hdr">
+  <div class="hdr-pre">Forest Dealerships · Internal Tool · Confidential</div>
+  <div class="hdr-title">VLDS Quarterly Incentive Process</div>
+  <div class="hdr-sub">Eligible Sales · Growth Analysis · Incentive Derivation</div>
+  <div class="pills">
+    <span class="pill gold">📅 {st.session_state['quarter']}</span>
+    <span class="pill">📊 {st.session_state['mode']}</span>
+    {sp} {dp}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── CONFIGURE ─────────────────────────────────────────────────────────────────
+
+sec("⚙️  Configure")
+c1, c2, _ = st.columns([1,1,4])
+with c1:
+    q = st.selectbox("Quarter",
+        ["Q4 2024-25","Q3 2024-25","Q2 2024-25","Q1 2024-25","Q4 2023-24"],
+        key="q_sel")
+    st.session_state["quarter"] = q
+with c2:
+    m = st.selectbox("Mode", ["Quarterly","Annual"], key="m_sel")
+    st.session_state["mode"] = m
+
+
+# ── UPLOAD — 7 FILES ──────────────────────────────────────────────────────────
+
+sec("📂  Upload Files")
+
+# Show column names detected — useful for debugging
+loaded_keys = [fk for fk in FKEYS if st.session_state[f"{fk}_cols"]]
+if loaded_keys:
+    with st.expander("🔍  Column names detected in uploaded files"):
+        for fk in loaded_keys:
+            cols = st.session_state[f"{fk}_cols"]
+            st.markdown(f"**{FLABEL[fk]}:**")
+            st.code(", ".join(str(c) for c in cols))
+
+st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+rA1, rA2 = st.columns(2)
+with rA1:
+    _file_card("base",   "🗂  Base Data",
+               "Raw client data · All customers\n"
+               "Used only to count Non-4S records",
+               "up_base")
+with rA2:
+    _file_card("dealer", "🏪  4S Dealer List",
+               "Master list · Sheet1 has Customer Account Number\n"
+               "Used with Base Data for Non-4S count",
+               "up_dealer")
+
+st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+rB1, rB2, rB3 = st.columns(3)
+with rB1:
+    _file_card("vlds", "📁  VLDS Q4-2025",
+               "Select 'Main' sheet\n"
+               "Cols: LOB · Remarks · BD · Revenue Amount · Reporting Fiscal Month",
+               "up_vlds")
+with rB2:
+    _file_card("prev", "📋  VLDS Q4-2024 Summary",
+               "Select 'Final Summary' sheet\n"
+               "Cols: Customer Number · Final Amount Q4-24",
+               "up_prev")
+with rB3:
+    _file_card("excl", "🚫  Exclusion List",
+               "Cols: Particulars · Item No · Column Name\n"
+               "~49 criteria",
+               "up_excl")
+
+st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+rC1, rC2 = st.columns(2)
+with rC1:
+    _file_card("dfracd", "🔍  DF & RACD File",
+               "4 sheets (Q1–Q4) · Select Q4 sheet\n"
+               "Matched via BD concat key",
+               "up_dfracd")
+with rC2:
+    _file_card("slab", "📊  Slab Table",
+               "Cols: Slab · Growth_From_% · Growth_To_% · Incentive_%\n"
+               "Update each quarter",
+               "up_slab")
+
+
+# ── RUN ───────────────────────────────────────────────────────────────────────
+
+st.markdown("---")
+ready = n_loaded() == 7
+if not ready:
+    miss = [FLABEL[fk] for fk in FKEYS if st.session_state[f"{fk}_raw"] is None]
+    al("warn", f"{len(miss)} file(s) not yet loaded", "  ·  ".join(miss))
+
+_, bc, _ = st.columns([1,3,1])
+with bc:
+    run = st.button("🚀  Run VLDS Process", use_container_width=True, disabled=not ready)
+st.markdown("---")
+
+
+# ── PROCESS ───────────────────────────────────────────────────────────────────
+
+if run and ready:
+    prog = st.progress(0, "Reading files…")
+    errs = []
+
+    def safe_load(fk):
+        try:
+            return _load(fk)
+        except Exception as e:
+            errs.append(f"{FLABEL[fk]}: {e}")
+            return None
+
+    base_df   = safe_load("base")
+    dealer_df = safe_load("dealer")
+    vlds_df   = safe_load("vlds")
+    prev_df   = safe_load("prev")
+    excl_df   = safe_load("excl")
+    dfracd_df = safe_load("dfracd")
+    slab_df   = safe_load("slab")
+
+    if errs:
+        for e in errs: al("err","File read error", e)
+        st.stop()
+
+    if vlds_df is None or len(vlds_df) < 2:
+        al("err","VLDS Q4-2025 has no data",
+           "Check sheet selector — 'Main' sheet must be selected.")
+        st.stop()
+
+    # Step 0 — 4S count (base data only)
+    prog.progress(10, "Step 0 — 4S filter count…")
+    s0 = filter_4s(base_df or pd.DataFrame(),
+                   dealer_df or pd.DataFrame())
+
+    # Step 1 — LOB / Remarks
+    prog.progress(22, "Step 1 — LOB filter…")
+    work = apply_lob_filter(vlds_df)
+
+    # Store column detection for diagnostics
+    det = {
+        "LOB":                    fc(work,"LOB","Lob","lob")             or "❌",
+        "Remarks":                fc(work,"Remarks","Remark","remarks")  or "❌",
+        "Revenue Amount":         fc(work,"Revenue Amount","revenue amount","Amount") or "❌",
+        "Customer Account Number":fc(work,"Customer Account Number","customer account number") or "❌",
+        "Customer Account Name":  fc(work,"Customer Account Name","customer account name") or "❌",
+        "Zone":                   fc(work,"Zone","zone","Territory")     or "❌",
+        "Reporting Fiscal Month": fc(work,"Reporting Fiscal Month","reporting fiscal month","Month") or "❌",
+        "BD":                     fc(work,"BD","bd","Concat Key")        or "❌",
+    }
+    st.session_state["det"]       = det
+    st.session_state["vlds_cols"] = list(vlds_df.columns)
+
+    # Step 2 — Exclusion list
+    prog.progress(40, "Step 2 — Exclusion list…")
+    work = apply_exclusions(work, excl_df)
+
+    # Step 3 — DF/RACD
+    prog.progress(58, "Step 3 — DF/RACD…")
+    work = apply_dfracd(work, dfracd_df)
+
+    # Split
+    eligible, excluded = split(work)
+
+    # Pivot
+    prog.progress(72, "Building pivot…")
+    pivot_df = build_pivot(eligible)
+
+    # Summary
+    prog.progress(87, "Building final summary…")
+    summary_df = build_summary(eligible, excluded, prev_df, slab_df)
+
+    prog.progress(100, "✅  Done!")
+
+    st.session_state.update({
+        "done":       True,
+        "eligible":   eligible,
+        "excluded":   excluded,
+        "pivot_df":   pivot_df,
+        "summary_df": summary_df,
+        "n_base":     s0["n_base"],
+        "n_non4s":    s0["n_non4s"],
+        "n_work":     len(vlds_df),
+    })
+    st.rerun()
+
+
+# ── RESULTS ───────────────────────────────────────────────────────────────────
+
+if st.session_state.get("done"):
+    eligible   = st.session_state["eligible"]
+    excluded   = st.session_state["excluded"]
+    pivot_df   = st.session_state["pivot_df"]
+    summary_df = st.session_state["summary_df"]
+    n_base     = st.session_state.get("n_base",  0)
+    n_non4s    = st.session_state.get("n_non4s", 0)
+    n_work     = st.session_state.get("n_work",  0)
+    quarter    = st.session_state["quarter"]
+    mode       = st.session_state["mode"]
+    det        = st.session_state.get("det", {})
+
+    sec("📊  Results")
+
+    # Show column detection only when something is missing
+    miss = [k for k,v in det.items() if "❌" in str(v)]
+    if miss or len(eligible) == 0:
+        with st.expander("⚠️  Column Detection — open to diagnose 0 results",
+                         expanded=True):
+            ca, cb = st.columns(2)
+            with ca:
+                st.markdown("**Columns detected:**")
+                for k, v in det.items():
+                    icon = "✅" if "❌" not in str(v) else "❌"
+                    st.markdown(f"{icon} **{k}:** `{v}`")
+            with cb:
+                st.markdown("**All columns in your VLDS Q4-2025 file:**")
+                vc = st.session_state.get("vlds_cols",[])
+                if vc:
+                    st.code("\n".join(str(c) for c in vc))
+            if miss:
+                st.error(
+                    f"Not found: {', '.join(miss)}\n\n"
+                    "Look at the column list on the right.\n"
+                    "Copy the exact name and share it — one-line fix.")
+
+    al("ok","✅  Done",
+       f"Quarter: {quarter}  ·  {len(eligible):,} eligible  ·  {len(excluded):,} excluded")
+
+    amt_e      = fc(eligible,"Revenue Amount","revenue amount","Amount") if not eligible.empty else None
+    elig_sales = num(eligible[amt_e]).sum() if amt_e and not eligible.empty else 0
+    disc_total = (pd.to_numeric(summary_df.get("Discount Value",
+                  pd.Series(dtype=float)), errors="coerce").sum()
+                  if "Discount Value" in summary_df.columns else 0)
+    dfracd_n   = int(excluded["_reason"].str.contains("DF/RACD",na=False).sum()
+                     ) if not excluded.empty else 0
+    crit_n     = len(excluded) - dfracd_n
+
+    st.markdown(f"""<div class="krow">
+      {kpi("📋","Base Records",   f"{n_base:,}",        "")}
+      {kpi("🏪","Non-4S Removed", f"{n_non4s:,}",       "r")}
+      {kpi("📁","VLDS Main Rows", f"{n_work:,}",        "")}
+      {kpi("✅","Eligible",       f"{len(eligible):,}", "g")}
+      {kpi("🚫","Criteria Excl.", f"{crit_n:,}",        "r")}
+      {kpi("🔍","DF/RACD Excl.", f"{dfracd_n:,}",       "r")}
+      {kpi("💰","Eligible Sales", inr(elig_sales),      "a")}
+      {kpi("🏷️","Total Discount", inr(disc_total),      "a")}
+    </div>""", unsafe_allow_html=True)
+
+    t1,t2,t3,t4 = st.tabs([
+        "📈 Final Summary","📊 Pivot",
+        "🚫 Excluded Records","✅ Eligible Data",
+    ])
+
+    with t1:
+        if summary_df.empty:
+            al("err","No summary data",
+               "Open Column Detection above — check Revenue Amount and "
+               "Customer Account Number are found (✅).")
+        else:
+            srch = st.text_input("🔎 Search dealer", placeholder="Name or number…", key="s1")
+            disp = summary_df.copy()
+            if srch:
+                msk = pd.Series(False, index=disp.index)
+                for c in disp.columns:
+                    msk |= disp[c].astype(str).str.contains(srch,case=False,na=False)
+                disp = disp[msk]
+            for c in disp.columns:
+                cl = c.lower()
+                if any(k in cl for k in ("amount","q4","deducted","increase","discount value")):
+                    disp[c] = disp[c].apply(
+                        lambda x: inr(x) if isinstance(x,(int,float)) else x)
+                elif "growth" in cl and "value" not in cl:
+                    disp[c] = disp[c].apply(
+                        lambda x: f"{float(x)*100:.2f}%"
+                        if isinstance(x,(int,float)) and not
+                        (isinstance(x,float) and (np.isnan(x) or np.isinf(x)))
+                        else "N/A")
+                elif "discount %" in cl:
+                    disp[c] = disp[c].apply(
+                        lambda x: f"{x:.2f}%" if isinstance(x,(int,float)) else "—")
+            st.dataframe(safe_df(disp), use_container_width=True, hide_index=True)
+            st.caption(f"{len(disp)} rows")
+
+    with t2:
+        if pivot_df.empty:
+            al("warn","Pivot empty",
+               f"Month column detected as: '{det.get('Reporting Fiscal Month','❌')}'\n"
+               "If ❌ — open Column Detection above and share the exact month column name.")
+        else:
+            st.dataframe(safe_df(pivot_df), use_container_width=True, hide_index=True)
+            st.caption(f"{max(0,len(pivot_df)-1)} dealers + Grand Total")
+
+    with t3:
+        if excluded.empty:
+            al("info","No excluded records.")
+        else:
+            grp = excluded["_reason"].value_counts().reset_index()
+            grp.columns = ["Exclusion Reason","Count"]
+            ca,cb = st.columns([1,2])
+            with ca:
+                st.dataframe(grp, use_container_width=True, hide_index=True)
+            with cb:
+                vis = [c for c in excluded.columns if not c.startswith("_")]
+                st.dataframe(safe_df(excluded[vis].head(500).reset_index(drop=True)),
+                             use_container_width=True, hide_index=True)
+
+    with t4:
+        if eligible.empty:
+            al("warn","No eligible records.")
+        else:
+            vis = [c for c in eligible.columns if not c.startswith("_")]
+            st.dataframe(safe_df(eligible[vis].head(500).reset_index(drop=True)),
+                         use_container_width=True, hide_index=True)
+            st.caption(f"{len(eligible):,} eligible records")
+
+    # Download
+    st.markdown("---")
+    sec("📥  Download Report")
+    al("info","Report: 2 sheets",
+       "Sheet 1 — Pivot: Revenue Amount by Customer × Reporting Fiscal Month\n"
+       "Sheet 2 — Final Summary: Customer Name · Zone · Customer Number · "
+       "Final Amount Q4-25 · Q4-24 · Deducted as per Exclusion List · "
+       "Final Amount Q4-24 · Increase · Growth · Discount % · Discount Value")
+
+    _, dc, _ = st.columns([1,2,1])
+    with dc:
+        try:
+            buf   = generate(pivot_df, summary_df, quarter, mode)
+            fname = (f"VLDS_{quarter.replace(' ','_').replace('/','_')}"
+                     f"_{mode}.xlsx")
+            st.download_button(f"⬇️  Download  {fname}",
+                               data=buf, file_name=fname,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+        except Exception as e:
+            al("err","Report error", str(e))
+
+st.markdown("""
+<div style='text-align:center;padding:18px 0 10px;color:#94A3B8;font-size:11px;'>
+VLDS Process · Forest Dealerships · Confidential
+</div>""", unsafe_allow_html=True)
