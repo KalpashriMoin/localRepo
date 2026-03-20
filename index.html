@@ -1,1 +1,1398 @@
+# app.py  –  VLDS Quarterly Incentive Processor  |  Forest Dealerships
+# ─────────────────────────────────────────────────────────────────────────────
+
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+import traceback
+
+from config import DEFAULT_EXCLUSION_LIST, DEFAULT_QUARTERLY_SLABS, DEFAULT_ANNUAL_SLABS
+from processor import VLDSProcessor
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="VLDS Incentive Processor",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSS
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Global ── */
+[data-testid="stAppViewContainer"] { background: #F4F7FB; }
+section.main { padding: 1.2rem 1.6rem 3rem; }
+
+/* ── Header ── */
+.vlds-header {
+    background: linear-gradient(120deg, #0f2d52 0%, #1a5c9e 70%, #1a7fc1 100%);
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    margin-bottom: 1.5rem;
+    display: flex; align-items: center; justify-content: space-between;
+}
+.vlds-header h1 { color:#fff; margin:0; font-size:1.6rem; font-weight:700; letter-spacing:-0.3px; }
+.vlds-header p  { color:rgba(255,255,255,0.75); margin:4px 0 0; font-size:0.88rem; }
+.vlds-badge {
+    background:rgba(255,255,255,0.15); color:#fff;
+    border-radius:20px; padding:4px 14px; font-size:0.8rem; font-weight:600;
+    border:1px solid rgba(255,255,255,0.3); white-space:nowrap;
+}
+
+/* ── Section title ── */
+.sec-title {
+    font-size:0.78rem; font-weight:700; letter-spacing:1.2px;
+    color:#6B7280; text-transform:uppercase; margin-bottom:0.8rem;
+}
+
+/* ── File card ── */
+.file-card {
+    background:#fff;
+    border:1.5px solid #E5EBF2;
+    border-radius:10px;
+    padding:1rem 1rem 0.7rem;
+    margin-bottom:0.6rem;
+    transition:border-color 0.2s;
+}
+.file-card:hover { border-color:#1a5c9e; }
+.file-card .fc-header {
+    display:flex; align-items:center; gap:0.5rem;
+    margin-bottom:0.3rem;
+}
+.file-card .fc-icon { font-size:1.2rem; }
+.file-card .fc-name { font-weight:600; color:#1E3A5F; font-size:0.88rem; }
+.file-card .fc-desc { font-size:0.75rem; color:#9CA3AF; margin-bottom:0.5rem; }
+.fc-required {
+    display:inline-block; font-size:0.65rem; font-weight:700;
+    color:#DC2626; background:#FEE2E2; border-radius:4px;
+    padding:1px 6px; margin-left:6px; vertical-align:middle;
+}
+.fc-optional {
+    display:inline-block; font-size:0.65rem; font-weight:700;
+    color:#059669; background:#D1FAE5; border-radius:4px;
+    padding:1px 6px; margin-left:6px; vertical-align:middle;
+}
+.fc-ok {
+    display:inline-block; font-size:0.65rem; font-weight:700;
+    color:#1D4ED8; background:#DBEAFE; border-radius:4px;
+    padding:1px 6px; margin-left:6px; vertical-align:middle;
+}
+
+/* ── Run button ── */
+div[data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, #0f2d52, #1a7fc1) !important;
+    color: #fff !important; border:none !important;
+    border-radius:10px !important; font-weight:700 !important;
+    font-size:1rem !important; padding:0.8rem 2.5rem !important;
+    width:100% !important; letter-spacing:0.3px;
+    box-shadow: 0 4px 15px rgba(26,92,158,0.35) !important;
+}
+div[data-testid="stDownloadButton"] > button {
+    background: #059669 !important; color:#fff !important;
+    border:none !important; border-radius:10px !important;
+    font-weight:700 !important; font-size:1rem !important;
+    padding:0.8rem 2rem !important; width:100% !important;
+    box-shadow:0 4px 12px rgba(5,150,105,0.3) !important;
+}
+
+/* ── Result cards ── */
+.r-card {
+    background:#fff; border:1px solid #E5EBF2;
+    border-top:4px solid; border-radius:10px;
+    padding:1rem; text-align:center;
+    box-shadow:0 1px 4px rgba(0,0,0,0.05);
+}
+.r-card .rval { font-size:1.7rem; font-weight:800; }
+.r-card .rlbl { font-size:0.78rem; color:#6B7280; margin-top:2px; }
+
+/* ── Config panel ── */
+.config-panel {
+    background:#fff; border:1px solid #E5EBF2;
+    border-radius:10px; padding:1.2rem 1.2rem 0.5rem;
+    margin-top:0.5rem;
+}
+
+/* ── Progress ── */
+.prog-label { font-size:0.85rem; color:#374151; font-weight:500; }
+
+/* ── Hide Streamlit chrome ── */
+#MainMenu, footer, header { visibility:hidden; }
+div[data-testid="stDecoration"] { display:none; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session state
+# ─────────────────────────────────────────────────────────────────────────────
+def _init_state():
+    if "excl_df" not in st.session_state:
+        st.session_state.excl_df = pd.DataFrame(DEFAULT_EXCLUSION_LIST)
+    if "q_slab_df" not in st.session_state:
+        st.session_state.q_slab_df = pd.DataFrame(DEFAULT_QUARTERLY_SLABS)
+    if "a_slab_df" not in st.session_state:
+        st.session_state.a_slab_df = pd.DataFrame(DEFAULT_ANNUAL_SLABS)
+    if "result_bytes" not in st.session_state:
+        st.session_state.result_bytes = None
+    if "run_log" not in st.session_state:
+        st.session_state.run_log = []
+    if "run_stats" not in st.session_state:
+        st.session_state.run_stats = {}
+    if "files" not in st.session_state:
+        st.session_state.files = {}
+
+_init_state()
+S = st.session_state
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Header
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="vlds-header">
+  <div>
+    <h1>🚗 &nbsp;VLDS Quarterly Incentive Processor</h1>
+    <p>Forest Dealerships &nbsp;·&nbsp; 4S Dealer VLDS Eligibility & Incentive Summary</p>
+  </div>
+  <div class="vlds-badge">Q4 · 2025</div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layout: 60% left (files + config) | 40% right (run + result)
+# ─────────────────────────────────────────────────────────────────────────────
+left, right = st.columns([6, 4], gap="large")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEFT — File Upload Cards
+# ═══════════════════════════════════════════════════════════════════════════════
+with left:
+
+    st.markdown('<div class="sec-title">📁 &nbsp;Input Files</div>', unsafe_allow_html=True)
+    st.caption("Accepted formats: .xlsx &nbsp;·&nbsp; .xls &nbsp;·&nbsp; .csv")
+
+    # File definitions
+    FILE_DEFS = [
+        {
+            "key": "vlds_main",
+            "icon": "📊",
+            "name": "VLDS Q4 2025 — Main File",
+            "desc": "Primary transaction file with LOB, BD, Revenue Amount, Remark columns",
+            "required": True,
+            "kws": ["4s", "vlds", "main", "data"],
+        },
+        {
+            "key": "df_recd",
+            "icon": "🔗",
+            "name": "DF & RECD — Q4 File",
+            "desc": "DF/RECD transactions for concat-key based exclusion (700+ records)",
+            "required": True,
+            "kws": ["df", "recd", "rec"],
+        },
+        {
+            "key": "prev_year",
+            "icon": "📅",
+            "name": "VLDS Q4 2024 — Previous Year Summary",
+            "desc": "Last year quarter data for YOY comparison, Increase & Growth %",
+            "required": True,
+            "kws": ["2024", "prev", "summary", "last"],
+        },
+        {
+            "key": "dealer_list",
+            "icon": "🏪",
+            "name": "4S Dealer List",
+            "desc": "Customer name, dealer number, status, bill-to / ship-to codes",
+            "required": False,
+            "kws": ["dealer", "4s", "list"],
+        },
+        {
+            "key": "excl_file",
+            "icon": "📋",
+            "name": "Exclusion List File",
+            "desc": "Import to override built-in exclusion list (Sr. No, Particulars, Column…)",
+            "required": False,
+            "kws": ["excl", "exclusion"],
+        },
+        {
+            "key": "slab_file",
+            "icon": "📈",
+            "name": "Slab Table File",
+            "desc": "Import to override built-in slab table (Quarterly & Annual)",
+            "required": False,
+            "kws": ["slab"],
+        },
+        {
+            "key": "base_data",
+            "icon": "🗂️",
+            "name": "Base Data File",
+            "desc": "Raw base file from client (optional — VLDS file usually sufficient)",
+            "required": False,
+            "kws": ["base", "raw"],
+        },
+    ]
+
+    # Render 2 cards per row
+    pairs = [FILE_DEFS[i:i+2] for i in range(0, len(FILE_DEFS), 2)]
+
+    for pair in pairs:
+        cols = st.columns(len(pair), gap="small")
+        for col, fdef in zip(cols, pair):
+            with col:
+                badge_html = '<span class="fc-required">Required</span>' if fdef["required"] \
+                    else '<span class="fc-optional">Optional</span>'
+                ok_badge = '<span class="fc-ok">✓ Uploaded</span>' if fdef["key"] in S.files else ""
+
+                st.markdown(f"""
+                <div class="file-card">
+                  <div class="fc-header">
+                    <span class="fc-icon">{fdef["icon"]}</span>
+                    <span class="fc-name">{fdef["name"]}</span>
+                    {badge_html}{ok_badge}
+                  </div>
+                  <div class="fc-desc">{fdef["desc"]}</div>
+                </div>""", unsafe_allow_html=True)
+
+                uploaded = st.file_uploader(
+                    fdef["key"],
+                    type=["xlsx", "xls", "csv"],
+                    key=f"fu_{fdef['key']}",
+                    label_visibility="collapsed",
+                )
+
+                if uploaded:
+                    # Fast validation: check file size and basic readability
+                    MAX_MB = 50
+                    size_mb = uploaded.size / (1024 * 1024)
+                    if size_mb > MAX_MB:
+                        st.error(f"File too large ({size_mb:.1f} MB). Max {MAX_MB} MB.")
+                    else:
+                        S.files[fdef["key"]] = uploaded
+
+                        # If it's exclusion / slab file, parse and update session
+                        if fdef["key"] == "excl_file":
+                            try:
+                                uploaded.seek(0)
+                                df_i = pd.read_excel(uploaded) if uploaded.name.lower().endswith(
+                                    ("xlsx", "xls")) else pd.read_csv(uploaded)
+                                if "Particulars" in df_i.columns:
+                                    if "Column Where Filter Applied" not in df_i.columns:
+                                        df_i["Column Where Filter Applied"] = "Line Item Description"
+                                    if "Item Number (if applicable)" not in df_i.columns:
+                                        df_i["Item Number (if applicable)"] = "NA"
+                                    if "Sr. No" not in df_i.columns:
+                                        df_i.insert(0, "Sr. No", range(1, len(df_i)+1))
+                                    S.excl_df = df_i
+                                    st.toast(f"✅ Exclusion list loaded ({len(df_i)} criteria)")
+                            except Exception as e:
+                                st.error(f"Cannot read exclusion file: {e}")
+
+                        elif fdef["key"] == "slab_file":
+                            try:
+                                uploaded.seek(0)
+                                df_s = pd.read_excel(uploaded) if uploaded.name.lower().endswith(
+                                    ("xlsx", "xls")) else pd.read_csv(uploaded)
+                                # Try to split into quarterly / annual based on column names
+                                q_cols = [c for c in df_s.columns if "quarterly" in c.lower() or
+                                          "growth" in c.lower() or "min" in c.lower()]
+                                S.q_slab_df = df_s
+                                st.toast(f"✅ Slab table loaded ({len(df_s)} rows)")
+                            except Exception as e:
+                                st.error(f"Cannot read slab file: {e}")
+
+    # ── Configuration (Exclusion + Slab editors) ─────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">⚙️ &nbsp;Dynamic Configuration</div>', unsafe_allow_html=True)
+
+    cfg_tab1, cfg_tab2, cfg_tab3 = st.tabs(["📋 Exclusion List", "📊 Quarterly Slabs", "📊 Annual Slabs"])
+
+    with cfg_tab1:
+        st.caption(
+            "First 8 rows → applied to **Transaction Type / Invoice Type**.  "
+            "Remaining rows → applied to **Line Item Description** (Item Number cross-checked)."
+        )
+
+        edited_excl = st.data_editor(
+            S.excl_df,
+            column_config={
+                "Sr. No": st.column_config.NumberColumn("#", width=50, disabled=True),
+                "Particulars": st.column_config.TextColumn("Exclusion Keyword", width="large"),
+                "Item Number (if applicable)": st.column_config.TextColumn("Item No.", width="small"),
+                "Column Where Filter Applied": st.column_config.SelectboxColumn(
+                    "Apply To Column",
+                    options=["Transaction Type / Invoice Type", "Line Item Description"],
+                    width="medium", required=True,
+                ),
+            },
+            num_rows="dynamic", use_container_width=True, height=280,
+            key="excl_editor",
+        )
+
+        ec1, ec2, ec3 = st.columns(3)
+        with ec1:
+            if st.button("💾 Save", key="save_excl", use_container_width=True):
+                edited_excl["Sr. No"] = range(1, len(edited_excl)+1)
+                S.excl_df = edited_excl
+                st.toast("Exclusion list saved ✓")
+        with ec2:
+            if st.button("↩ Reset", key="rst_excl", use_container_width=True):
+                S.excl_df = pd.DataFrame(DEFAULT_EXCLUSION_LIST)
+                st.rerun()
+        with ec3:
+            _eb = BytesIO()
+            S.excl_df.to_excel(_eb, index=False, engine="openpyxl")
+            st.download_button("⬇ Export", data=_eb.getvalue(),
+                               file_name="Exclusion_List.xlsx", use_container_width=True,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    with cfg_tab2:
+        st.caption("Min/Max = Growth % over previous year. Incentive Payout % applied to current quarter sales.")
+        edited_q = st.data_editor(
+            S.q_slab_df,
+            column_config={
+                "Slab": st.column_config.TextColumn("Slab", width="small"),
+                "Growth Over 2024 Min (%)": st.column_config.NumberColumn("Min Growth %", format="%.2f"),
+                "Growth Over 2024 Max (%)": st.column_config.NumberColumn("Max Growth %", format="%.2f"),
+                "Incentive Payout (%)": st.column_config.NumberColumn("Incentive %", format="%.2f"),
+            },
+            num_rows="dynamic", use_container_width=True, height=210, key="q_slab_ed",
+        )
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            if st.button("💾 Save Slabs", key="save_qslab", use_container_width=True):
+                S.q_slab_df = edited_q
+                st.toast("Quarterly slabs saved ✓")
+        with sc2:
+            if st.button("↩ Reset", key="rst_qslab", use_container_width=True):
+                S.q_slab_df = pd.DataFrame(DEFAULT_QUARTERLY_SLABS)
+                st.rerun()
+
+    with cfg_tab3:
+        st.caption("Annual slab rates for full-year incentive calculations.")
+        edited_a = st.data_editor(
+            S.a_slab_df,
+            column_config={
+                "Slab": st.column_config.TextColumn("Slab", width="small"),
+                "Growth Over 2024 Min (%)": st.column_config.NumberColumn("Min Growth %", format="%.2f"),
+                "Growth Over 2024 Max (%)": st.column_config.NumberColumn("Max Growth %", format="%.2f"),
+                "Incentive Payout (%)": st.column_config.NumberColumn("Incentive %", format="%.2f"),
+            },
+            num_rows="dynamic", use_container_width=True, height=210, key="a_slab_ed",
+        )
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            if st.button("💾 Save Slabs", key="save_aslab", use_container_width=True):
+                S.a_slab_df = edited_a
+                st.toast("Annual slabs saved ✓")
+        with ac2:
+            if st.button("↩ Reset", key="rst_aslab", use_container_width=True):
+                S.a_slab_df = pd.DataFrame(DEFAULT_ANNUAL_SLABS)
+                st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RIGHT — Status + Run + Download
+# ═══════════════════════════════════════════════════════════════════════════════
+with right:
+
+    # ── Upload status ──────────────────────────────────────────────────────────
+    st.markdown('<div class="sec-title">📌 &nbsp;Upload Status</div>', unsafe_allow_html=True)
+
+    req_keys  = ["vlds_main", "df_recd", "prev_year"]
+    opt_keys  = ["dealer_list", "excl_file", "slab_file", "base_data"]
+    req_done  = [k for k in req_keys  if k in S.files]
+    all_ready = len(req_done) == len(req_keys)
+
+    # Mini status rows
+    status_map = {
+        "vlds_main":   ("📊", "VLDS Q4 2025 Main"),
+        "df_recd":     ("🔗", "DF & RECD File"),
+        "prev_year":   ("📅", "Previous Year Summary"),
+        "dealer_list": ("🏪", "4S Dealer List"),
+        "excl_file":   ("📋", "Exclusion List"),
+        "slab_file":   ("📈", "Slab Table"),
+        "base_data":   ("🗂️", "Base Data"),
+    }
+
+    rows_html = ""
+    for key, (icon, label) in status_map.items():
+        done = key in S.files
+        is_req = key in req_keys
+        color = "#10B981" if done else ("#EF4444" if is_req else "#D1D5DB")
+        badge = "✓ Ready" if done else ("Missing" if is_req else "–")
+        b_color = "#ECFDF5" if done else ("#FEF2F2" if is_req else "#F9FAFB")
+        b_text  = "#059669" if done else ("#DC2626" if is_req else "#9CA3AF")
+        rows_html += f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+             padding:0.45rem 0.7rem;border-radius:8px;background:{b_color};
+             margin-bottom:0.35rem;border-left:3px solid {color};">
+          <span style="font-size:0.83rem;color:#374151;">{icon}&nbsp; {label}</span>
+          <span style="font-size:0.72rem;font-weight:700;color:{b_text};">{badge}</span>
+        </div>"""
+    st.markdown(rows_html, unsafe_allow_html=True)
+
+    # Summary counts
+    total_up  = len([k for k in (req_keys + opt_keys) if k in S.files])
+    excl_count = len(S.excl_df)
+    st.markdown(f"""
+    <div style="display:flex;gap:0.5rem;margin:0.9rem 0 1.1rem;">
+      <div style="flex:1;text-align:center;background:#EEF2FF;border-radius:8px;padding:0.6rem;">
+        <div style="font-size:1.4rem;font-weight:800;color:#4F46E5;">{total_up}/7</div>
+        <div style="font-size:0.72rem;color:#6B7280;">Files Uploaded</div>
+      </div>
+      <div style="flex:1;text-align:center;background:#F3E8FF;border-radius:8px;padding:0.6rem;">
+        <div style="font-size:1.4rem;font-weight:800;color:#7C3AED;">{excl_count}</div>
+        <div style="font-size:0.72rem;color:#6B7280;">Excl. Criteria</div>
+      </div>
+      <div style="flex:1;text-align:center;background:#ECFDF5;border-radius:8px;padding:0.6rem;">
+        <div style="font-size:1.4rem;font-weight:800;color:#059669;">{len(S.q_slab_df)}</div>
+        <div style="font-size:0.72rem;color:#6B7280;">Slab Tiers</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Warning if required files missing ─────────────────────────────────────
+    if not all_ready:
+        missing = [status_map[k][1] for k in req_keys if k not in S.files]
+        st.warning(f"Upload required files first:\n" + "\n".join(f"• {m}" for m in missing))
+
+    st.markdown('<div class="sec-title">▶ &nbsp;Run Processing</div>', unsafe_allow_html=True)
+
+    run_clicked = st.button(
+        "🚀  Run VLDS Processing",
+        type="primary",
+        disabled=not all_ready,
+        use_container_width=True,
+    )
+
+    # ── Processing ─────────────────────────────────────────────────────────────
+    if run_clicked:
+        S.result_bytes = None
+        S.run_log      = []
+        S.run_stats    = {}
+
+        prog  = st.progress(0, text="Starting …")
+        label = st.empty()
+
+        def _cb(pct, msg):
+            prog.progress(pct, text=msg)
+            label.markdown(f'<div class="prog-label">⚙️ &nbsp; {msg}</div>', unsafe_allow_html=True)
+
+        try:
+            processor = VLDSProcessor(
+                exclusion_df    = S.excl_df,
+                quarterly_slab_df = S.q_slab_df,
+                annual_slab_df  = S.a_slab_df,
+            )
+            out, logs, stats = processor.run(
+                vlds_file      = S.files.get("vlds_main"),
+                df_recd_file   = S.files.get("df_recd"),
+                prev_year_file = S.files.get("prev_year"),
+                dealer_list_file = S.files.get("dealer_list"),
+                progress_cb    = _cb,
+            )
+            S.result_bytes = out
+            S.run_log      = logs
+            S.run_stats    = stats
+            prog.progress(100, text="Complete ✓")
+            label.success("✅ Processing complete!")
+            st.balloons()
+
+        except Exception as e:
+            prog.empty()
+            label.error(f"❌ Error: {e}")
+            with st.expander("Error Details"):
+                st.code(traceback.format_exc())
+
+    # ── Results ─────────────────────────────────────────────────────────────
+    if S.result_bytes:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="sec-title">📈 &nbsp;Results</div>', unsafe_allow_html=True)
+
+        stats = S.run_stats
+        cr1, cr2 = st.columns(2)
+
+        def _rcard(col, val, label, color):
+            col.markdown(f"""
+            <div class="r-card" style="border-top-color:{color};">
+              <div class="rval" style="color:{color};">{val}</div>
+              <div class="rlbl">{label}</div>
+            </div>""", unsafe_allow_html=True)
+
+        _rcard(cr1, f"{stats.get('total_rows', 0):,}",    "Total Rows Loaded",   "#4F46E5")
+        _rcard(cr2, f"{stats.get('eligible_rows', 0):,}", "Eligible Records",    "#059669")
+
+        cr3, cr4 = st.columns(2)
+        _rcard(cr3, f"{stats.get('excluded_rows', 0):,}", "Excluded Records",    "#DC2626")
+        _rcard(cr4, f"₹ {stats.get('eligible_sales_cr', 0):,.2f} Cr", "Eligible Sales", "#D97706")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        st.download_button(
+            label     = "📥  Download Excel Report",
+            data      = S.result_bytes,
+            file_name = "VLDS_Q4_2025_Incentive_Report.xlsx",
+            mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        st.caption("Output: **Sheet 1** — Quarterly Pivot  &nbsp;|&nbsp;  **Sheet 2** — Final Summary")
+
+        # ── Processing log ───────────────────────────────────────────────────
+        if S.run_log:
+            with st.expander("📋 View Processing Log", expanded=False):
+                for entry in S.run_log:
+                    msg = entry.get("msg", "")
+                    lvl = entry.get("level", "info")
+                    if lvl == "success":
+                        st.markdown(f"✅ {msg}")
+                    elif lvl == "warning":
+                        st.warning(msg)
+                    elif lvl == "error":
+                        st.error(msg)
+                    else:
+                        st.markdown(f"ℹ️ {msg}")
+
+        st.markdown("")
+        if st.button("🔄 Re-run / Reset", use_container_width=False):
+            S.result_bytes = None
+            S.run_log      = []
+            S.run_stats    = {}
+            st.rerun()
+
+    # ── Quick guide (always visible at bottom) ─────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">❓ &nbsp;Quick Guide</div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="background:#fff;border:1px solid #E5EBF2;border-radius:10px;
+         padding:1rem 1.1rem;font-size:0.82rem;color:#374151;line-height:1.8;">
+      <b>1.</b> Upload the 3 required files (left panel)<br>
+      <b>2.</b> Optional: upload Dealer List, Exclusion, Slab, Base Data files<br>
+      <b>3.</b> Review / edit Exclusion List & Slabs in Configuration tabs<br>
+      <b>4.</b> Click <b>Run VLDS Processing</b><br>
+      <b>5.</b> Download the 2-sheet Excel report<br>
+      <hr style="margin:0.6rem 0;border-color:#E5EBF2;">
+      <b>Output Sheets:</b><br>
+      &nbsp;&nbsp;• <b>Quarterly Pivot</b> — Dealer × Month revenue table<br>
+      &nbsp;&nbsp;• <b>Final Summary</b> — YOY comparison with Increase, Growth %, Discount Value
+    </div>
+    """, unsafe_allow_html=True)
+
+
+
+
+
+
+# config.py  –  VLDS Quarterly Incentive Processor  |  Forest Dealerships
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Eligibility: LOB values that ARE eligible for VLDS ────────────────────────
+ELIGIBLE_LOB_VALUES = ["CBD", "NEW ENGINE", "REBUILD", "SOLUTIONS", "PARTS"]
+
+# ── For PARTS LOB: eligible Sub-LOB values (blanks also kept) ─────────────────
+ELIGIBLE_SUB_LOB_FOR_PARTS = ["CORE", "FILTERS", "RECON", ""]   # "" = blanks
+
+# ── Segments to EXCLUDE ───────────────────────────────────────────────────────
+EXCLUDE_SEGMENTS = ["EDO"]
+
+# ── For AUTO segment: only keep this Invoice Type ─────────────────────────────
+AUTO_SEGMENT_KEEP_INVOICE_TYPE = "CSS CORE COMP"
+
+# ── Batch Source exclusion ────────────────────────────────────────────────────
+EXCLUDE_BATCH_SOURCE_KEYWORDS = ["DDS-ACOUSTICS", "DDS ACOUSTICS"]
+
+# ── Item Code (Battery) exclusion ─────────────────────────────────────────────
+EXCLUDE_ITEM_CODES = ["AX00000000"]
+
+# ── Credit Memo-Misc Line Item eligibility (Criteria E) ───────────────────────
+# Yes = include in VLDS, No = exclude
+CREDIT_MEMO_LINE_ITEM_MAP = {
+    "EARLY PAYMENT DISCOUNT": "No",
+    "PRICE SUPPORT": "Yes",
+    "DISCOUNT ON SALE": "Yes",
+    "SPECIAL DISCOUNT": "Yes",
+    "RENTAL CUSTOMER": "Yes",
+    "INCENTIVE TO ENGINEER": "No",
+}
+
+# ── BD column: marker used for DF Kit exclusions ──────────────────────────────
+BD_NO_DF_KIT_MARKER = "NO DF KIT"
+
+# ── Remark values that signal exclusion ──────────────────────────────────────
+REMARK_EXCLUSION_KEYWORDS = ["NO DF", "NO RECD", "RECD", "DF/RECD"]
+
+# ── Default Slab Table ────────────────────────────────────────────────────────
+# Quarterly slab: Min/Max in Cr, Incentive Payout %
+DEFAULT_QUARTERLY_SLABS = [
+    {"Slab": "Slab 1", "Growth Over 2024 Min (%)": 0,   "Growth Over 2024 Max (%)": 5,   "Incentive Payout (%)": 1.00},
+    {"Slab": "Slab 2", "Growth Over 2024 Min (%)": 5,   "Growth Over 2024 Max (%)": 10,  "Incentive Payout (%)": 1.50},
+    {"Slab": "Slab 3", "Growth Over 2024 Min (%)": 10,  "Growth Over 2024 Max (%)": 15,  "Incentive Payout (%)": 2.00},
+    {"Slab": "Slab 4", "Growth Over 2024 Min (%)": 15,  "Growth Over 2024 Max (%)": 20,  "Incentive Payout (%)": 2.50},
+    {"Slab": "Slab 5", "Growth Over 2024 Min (%)": 20,  "Growth Over 2024 Max (%)": 9999, "Incentive Payout (%)": 3.00},
+]
+
+DEFAULT_ANNUAL_SLABS = [
+    {"Slab": "Slab 1", "Growth Over 2024 Min (%)": 0,   "Growth Over 2024 Max (%)": 5,   "Incentive Payout (%)": 0.75},
+    {"Slab": "Slab 2", "Growth Over 2024 Min (%)": 5,   "Growth Over 2024 Max (%)": 10,  "Incentive Payout (%)": 1.25},
+    {"Slab": "Slab 3", "Growth Over 2024 Min (%)": 10,  "Growth Over 2024 Max (%)": 15,  "Incentive Payout (%)": 1.75},
+    {"Slab": "Slab 4", "Growth Over 2024 Min (%)": 15,  "Growth Over 2024 Max (%)": 20,  "Incentive Payout (%)": 2.25},
+    {"Slab": "Slab 5", "Growth Over 2024 Min (%)": 20,  "Growth Over 2024 Max (%)": 9999, "Incentive Payout (%)": 2.75},
+]
+
+# ── Default Exclusion List (49 criteria) ─────────────────────────────────────
+# Column: "Transaction Type / Invoice Type" → first 8
+# Column: "Line Item Description" → remaining  (also checked against Item Number)
+DEFAULT_EXCLUSION_LIST = [
+    # ── First 8: Applied to Transaction Type / Invoice Type ──
+    {"Sr. No": 1,  "Particulars": "Credit Note",              "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 2,  "Particulars": "Debit Note",               "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 3,  "Particulars": "Stock Transfer",           "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 4,  "Particulars": "Internal Transfer",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 5,  "Particulars": "Purchase Return",          "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 6,  "Particulars": "Cancelled Invoice",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 7,  "Particulars": "Proforma Invoice",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    {"Sr. No": 8,  "Particulars": "Sample Invoice",           "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Transaction Type / Invoice Type"},
+    # ── Remaining: Applied to Line Item Description ──
+    {"Sr. No": 9,  "Particulars": "Auto Parts",               "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 10, "Particulars": "Battery",                  "Item Number (if applicable)": "AX00000000", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 11, "Particulars": "Datum",                    "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 12, "Particulars": "Lubricants",               "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 13, "Particulars": "Accessories",              "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 14, "Particulars": "AMC",                      "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 15, "Particulars": "Extended Warranty",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 16, "Particulars": "Insurance",                "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 17, "Particulars": "Finance Charges",          "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 18, "Particulars": "Registration Charges",     "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 19, "Particulars": "Stamp Duty",               "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 20, "Particulars": "Hypothecation Charges",    "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 21, "Particulars": "Handling Charges",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 22, "Particulars": "Documentation Charges",    "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 23, "Particulars": "PDI Charges",              "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 24, "Particulars": "Freight Outward",          "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 25, "Particulars": "Transit Insurance",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 26, "Particulars": "Labour",                   "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 27, "Particulars": "Logistics Charges",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 28, "Particulars": "Packing Charges",          "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 29, "Particulars": "Loading Charges",          "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 30, "Particulars": "Unloading Charges",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 31, "Particulars": "Storage Charges",          "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 32, "Particulars": "Delivery Charges",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 33, "Particulars": "Processing Fee",           "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 34, "Particulars": "Service Charge",           "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 35, "Particulars": "Depot Sales (DPT)",        "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 36, "Particulars": "Miscellaneous",            "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 37, "Particulars": "Advance",                  "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 38, "Particulars": "Security Deposit",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 39, "Particulars": "EMD",                      "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 40, "Particulars": "Price Support",            "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 41, "Particulars": "Early Payment Discount",   "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 42, "Particulars": "Incentive to Engineer",    "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 43, "Particulars": "RMA Credit Notes",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 44, "Particulars": "Discount on Sale",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 45, "Particulars": "Special Discount",         "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 46, "Particulars": "Rebate",                   "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 47, "Particulars": "Subsidy",                  "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 48, "Particulars": "MEIS",                     "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+    {"Sr. No": 49, "Particulars": "SEIS",                     "Item Number (if applicable)": "NA", "Column Where Filter Applied": "Line Item Description"},
+]
+
+# ── Column Name Synonyms (fuzzy matching) ─────────────────────────────────────
+# Maps logical field → list of possible column header names (case-insensitive)
+COLUMN_SYNONYMS = {
+    "lob":            ["lob", "line of business"],
+    "sub_lob":        ["sub lob", "sublob", "sub-lob"],
+    "segment":        ["segment"],
+    "invoice_type":   ["invoice type", "invoicetype", "order header subtype code", "invoice_type"],
+    "batch_source":   ["batch source", "batchsource", "batch_source"],
+    "item":           ["item", "item number", "item_number", "item code"],
+    "line_item":      ["line item", "line item description", "inventory item description", "line_item"],
+    "revenue":        ["revenue amount", "revenue_amount", "rev amount", "amount"],
+    "invoice_no":     ["invoice number", "invoice_number", "invoice no"],
+    "dealer_4s":      ["4s dealer", "4s_dealer", "dealer", "customer account name", "customer name"],
+    "fiscal_month":   ["reporting to fiscal month", "reporting fiscal month", "cmi month", "fiscal month", "month"],
+    "fiscal_year":    ["reporting to fiscal year", "reporting fiscal year", "fiscal year", "year"],
+    "customer_no":    ["customer account number", "customer number", "customer_number", "dealer number"],
+    "bd":             ["bd", "b.d.", "batch data"],
+    "remark":         ["remark", "remarks", "consider for vd", "consider for vlds", "eligible sales/ not eligible"],
+    "zone":           ["zone"],
+    "split_dealer":   ["split dealership", "split dealer"],
+}
+
+
+
+
+# processor.py  –  VLDS Quarterly Incentive Processor  |  Forest Dealerships
+# ─────────────────────────────────────────────────────────────────────────────
+
+import pandas as pd
+import numpy as np
+from io import BytesIO
+from datetime import datetime
+import xlsxwriter
+
+from config import (
+    ELIGIBLE_LOB_VALUES, ELIGIBLE_SUB_LOB_FOR_PARTS, EXCLUDE_SEGMENTS,
+    AUTO_SEGMENT_KEEP_INVOICE_TYPE, EXCLUDE_BATCH_SOURCE_KEYWORDS,
+    EXCLUDE_ITEM_CODES, CREDIT_MEMO_LINE_ITEM_MAP,
+    BD_NO_DF_KIT_MARKER, REMARK_EXCLUSION_KEYWORDS, COLUMN_SYNONYMS,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Column Resolver
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ColumnResolver:
+    """Fuzzy column name resolver using synonym lists."""
+
+    def __init__(self, df_columns: list):
+        self._cols = {c.strip().lower(): c for c in df_columns}
+
+    def get(self, key: str, fallback: str = None) -> str:
+        """Return the actual DataFrame column name for a logical key."""
+        synonyms = COLUMN_SYNONYMS.get(key, [key.lower()])
+        for syn in synonyms:
+            if syn.lower() in self._cols:
+                return self._cols[syn.lower()]
+        return fallback  # None if not found
+
+    def has(self, key: str) -> bool:
+        return self.get(key) is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Utility helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _norm(s) -> pd.Series:
+    """Strip whitespace + uppercase for comparison."""
+    return s.fillna("").astype(str).str.strip().str.upper()
+
+
+def _to_num(s) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+
+def _safe(v) -> float:
+    try:
+        f = float(v)
+        return 0.0 if (pd.isna(f) or np.isinf(f)) else f
+    except Exception:
+        return 0.0
+
+
+def _read(file_obj, sheet_kws: list = None):
+    """Read an Excel/CSV file. Tries to find a matching sheet by keywords."""
+    if file_obj is None:
+        return None
+    file_obj.seek(0)
+    name = file_obj.name.lower()
+
+    if name.endswith(".csv"):
+        return pd.read_csv(file_obj, dtype=str)
+
+    # Try keyword-matched sheet
+    if sheet_kws:
+        try:
+            xl = pd.ExcelFile(file_obj)
+            for sheet in xl.sheet_names:
+                for kw in sheet_kws:
+                    if kw.lower() in sheet.lower():
+                        file_obj.seek(0)
+                        return pd.read_excel(file_obj, sheet_name=sheet, dtype=str)
+        except Exception:
+            pass
+
+    file_obj.seek(0)
+    return pd.read_excel(file_obj, sheet_name=0, dtype=str)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VLDS Processor
+# ─────────────────────────────────────────────────────────────────────────────
+
+class VLDSProcessor:
+
+    def __init__(self, exclusion_df: pd.DataFrame, quarterly_slab_df: pd.DataFrame,
+                 annual_slab_df: pd.DataFrame):
+        self.excl_df     = exclusion_df
+        self.q_slab_df   = quarterly_slab_df
+        self.a_slab_df   = annual_slab_df
+        self.log: list   = []
+        self.stats: dict = {}
+
+    def _log(self, msg, level="info"):
+        self.log.append({"level": level, "msg": msg})
+
+    # ── Step 1: Load VLDS Q4 2025 file ────────────────────────────────────────
+    def step1_load(self, vlds_file) -> pd.DataFrame:
+        self._log("Step 1 ▸ Loading VLDS Q4 2025 main file …")
+        df = _read(vlds_file, sheet_kws=["4s", "vlds", "data", "main"])
+        if df is None or df.empty:
+            raise ValueError("VLDS Q4 2025 file is empty or unreadable.")
+        self.stats["total_rows"] = len(df)
+        self._log(f"  Loaded {len(df):,} rows, {len(df.columns)} columns", "success")
+        return df
+
+    # ── Step 2: LOB & Sub-LOB Eligibility (Criteria A) ────────────────────────
+    def step2_lob_eligibility(self, df: pd.DataFrame) -> pd.DataFrame:
+        self._log("Step 2 ▸ Applying LOB / Sub-LOB eligibility (Criteria A) …")
+        before = len(df)
+        r = ColumnResolver(df.columns)
+
+        lob_col     = r.get("lob")
+        sub_lob_col = r.get("sub_lob")
+        seg_col     = r.get("segment")
+        inv_type_col= r.get("invoice_type")
+
+        if not lob_col:
+            self._log("  ⚠ LOB column not found — skipping this step", "warning")
+            return df
+
+        lob_norm = _norm(df[lob_col])
+        eligible_lobs = [v.upper() for v in ELIGIBLE_LOB_VALUES]
+
+        # Remove non-eligible LOBs
+        df = df[lob_norm.isin(eligible_lobs)].copy()
+        self._log(f"  After LOB filter: {before:,} → {len(df):,} rows")
+
+        # For PARTS: apply Sub-LOB filter (CORE, FILTERS, RECON, Blanks)
+        if sub_lob_col:
+            parts_mask   = _norm(df[lob_col]) == "PARTS"
+            sub_norm     = _norm(df[sub_lob_col])
+            eligible_sub = [v.upper() for v in ELIGIBLE_SUB_LOB_FOR_PARTS]
+            sub_ok       = sub_norm.isin(eligible_sub) | (sub_norm == "")
+            # Exclude PARTS rows where Sub-LOB is NOT in eligible list
+            remove_mask  = parts_mask & ~sub_ok
+            df = df[~remove_mask].copy()
+            self._log(f"  After Sub-LOB filter (PARTS): {len(df):,} rows")
+
+        # Exclude EDO segment
+        if seg_col:
+            seg_norm    = _norm(df[seg_col])
+            edo_mask    = seg_norm.isin([s.upper() for s in EXCLUDE_SEGMENTS])
+            df = df[~edo_mask].copy()
+            self._log(f"  After EDO exclusion: {len(df):,} rows")
+
+        # AUTO segment: keep only CSS CORE COMP Invoice Type
+        if seg_col and inv_type_col:
+            auto_mask    = _norm(df[seg_col]) == "AUTO"
+            inv_norm     = _norm(df[inv_type_col])
+            css_mask     = inv_norm.str.contains(AUTO_SEGMENT_KEEP_INVOICE_TYPE.upper(), regex=False)
+            # Remove AUTO rows that are NOT CSS CORE COMP
+            remove_auto  = auto_mask & ~css_mask
+            df = df[~remove_auto].copy()
+            self._log(f"  After AUTO/CSS CORE COMP filter: {len(df):,} rows")
+
+        removed = before - len(df)
+        self._log(f"  LOB eligibility complete: removed {removed:,} rows", "success")
+        return df
+
+    # ── Step 3: Batch Source & Item exclusions (Criteria C, D) ───────────────
+    def step3_batch_item_exclusions(self, df: pd.DataFrame) -> pd.DataFrame:
+        self._log("Step 3 ▸ Batch Source (DDS-Acoustics) & Item (Battery) exclusions …")
+        before = len(df)
+        r = ColumnResolver(df.columns)
+
+        batch_col = r.get("batch_source")
+        item_col  = r.get("item")
+
+        # Criteria C: DDS-Acoustics batch source
+        if batch_col:
+            batch_norm = _norm(df[batch_col])
+            dds_mask   = pd.Series(False, index=df.index)
+            for kw in EXCLUDE_BATCH_SOURCE_KEYWORDS:
+                dds_mask = dds_mask | batch_norm.str.contains(kw.upper(), regex=False)
+            df = df[~dds_mask].copy()
+            self._log(f"  DDS-Acoustics excluded: {dds_mask.sum():,} rows")
+
+        # Criteria D: Item code (Battery = AX00000000)
+        if item_col:
+            item_norm  = _norm(df[item_col])
+            batt_mask  = item_norm.isin([c.upper() for c in EXCLUDE_ITEM_CODES])
+            df = df[~batt_mask].copy()
+            self._log(f"  Battery item excluded: {batt_mask.sum():,} rows")
+
+        self._log(f"  Criteria C/D complete: removed {before - len(df):,} rows", "success")
+        return df
+
+    # ── Step 4: Credit Memo-Misc line item eligibility (Criteria E) ──────────
+    def step4_credit_memo_eligibility(self, df: pd.DataFrame) -> pd.DataFrame:
+        self._log("Step 4 ▸ Credit Memo-Misc eligibility check (Criteria E) …")
+        before = len(df)
+        r = ColumnResolver(df.columns)
+
+        batch_col = r.get("batch_source")
+        line_col  = r.get("line_item")
+
+        if not (batch_col and line_col):
+            self._log("  ⚠ Batch Source or Line Item column missing — skipping Criteria E", "warning")
+            return df
+
+        batch_norm = _norm(df[batch_col])
+        credit_mask = batch_norm.str.contains("CREDIT MEMO", regex=False) & \
+                      batch_norm.str.contains("MISC", regex=False)
+
+        line_norm = _norm(df[line_col])
+        exclude_keywords = [k.upper() for k, v in CREDIT_MEMO_LINE_ITEM_MAP.items() if v == "No"]
+
+        remove_mask = pd.Series(False, index=df.index)
+        for kw in exclude_keywords:
+            remove_mask = remove_mask | (credit_mask & line_norm.str.contains(kw, regex=False))
+
+        df = df[~remove_mask].copy()
+        self._log(f"  Criteria E complete: removed {remove_mask.sum():,} rows", "success")
+        return df
+
+    # ── Step 5: Exclusion List filter ────────────────────────────────────────
+    def step5_exclusion_list(self, df: pd.DataFrame) -> pd.DataFrame:
+        self._log("Step 5 ▸ Applying exclusion list (49 criteria) …")
+        before = len(df)
+        r = ColumnResolver(df.columns)
+
+        txn_col  = r.get("invoice_type")
+        line_col = r.get("line_item")
+        item_col = r.get("item")
+
+        excl = self.excl_df.copy()
+
+        # ── Transaction Type / Invoice Type exclusions ──
+        txn_excl = _norm(
+            excl.loc[
+                _norm(excl["Column Where Filter Applied"]).str.contains("TRANSACTION TYPE|INVOICE TYPE", regex=True),
+                "Particulars"
+            ]
+        ).tolist()
+
+        if txn_col and txn_excl:
+            txn_norm = _norm(df[txn_col])
+            mask = txn_norm.isin(txn_excl)
+            df = df[~mask].copy()
+            self._log(f"  Transaction Type exclusions: {mask.sum():,} rows removed")
+
+        # ── Line Item Description exclusions ──
+        line_excl = _norm(
+            excl.loc[
+                _norm(excl["Column Where Filter Applied"]).str.contains("LINE ITEM", regex=True),
+                "Particulars"
+            ]
+        ).tolist()
+
+        # Item Number cross-check
+        item_excl = excl.loc[
+            _norm(excl["Column Where Filter Applied"]).str.contains("LINE ITEM", regex=True) &
+            ~_norm(excl["Item Number (if applicable)"]).isin(["NA", "", "N/A"]),
+            "Item Number (if applicable)"
+        ]
+        item_excl_norm = _norm(item_excl).tolist()
+
+        removed_line = 0
+        if line_col and line_excl:
+            line_norm = _norm(df[line_col])
+            mask_line = pd.Series(False, index=df.index)
+            for kw in line_excl:
+                if kw:
+                    mask_line = mask_line | line_norm.str.contains(kw, regex=False, na=False)
+            removed_line += mask_line.sum()
+            df = df[~mask_line].copy()
+
+        if item_col and item_excl_norm:
+            item_norm = _norm(df[item_col])
+            mask_item = item_norm.isin(item_excl_norm)
+            removed_line += mask_item.sum()
+            df = df[~mask_item].copy()
+
+        self._log(f"  Line Item/Item Number exclusions: {removed_line:,} rows removed")
+        self._log(f"  Exclusion list complete: removed {before - len(df):,} total", "success")
+        return df
+
+    # ── Step 6: DF/RECD exclusion ─────────────────────────────────────────────
+    def step6_df_recd(self, df: pd.DataFrame, df_recd_file) -> pd.DataFrame:
+        self._log("Step 6 ▸ DF/RECD exclusion …")
+        before = len(df)
+        r = ColumnResolver(df.columns)
+
+        bd_col     = r.get("bd")
+        inv_col    = r.get("invoice_no")
+        item_col   = r.get("item")
+        rev_col    = r.get("revenue")
+        remark_col = r.get("remark")
+
+        recd_concat_keys: set = set()
+
+        # Build keys from DF/RECD file
+        if df_recd_file is not None:
+            try:
+                df_r = _read(df_recd_file)
+                if df_r is not None and not df_r.empty:
+                    rr = ColumnResolver(df_r.columns)
+                    inv_c  = rr.get("invoice_no")  or df_r.columns[0]
+                    item_c = rr.get("item")         or df_r.columns[1]
+                    rev_c  = rr.get("revenue")      or df_r.columns[-1]
+
+                    keys = (
+                        df_r[inv_c].fillna("").astype(str).str.strip() +
+                        df_r[item_c].fillna("").astype(str).str.strip() +
+                        df_r[rev_c].fillna("").astype(str).str.strip()
+                    )
+                    recd_concat_keys = set(keys.tolist())
+                    self._log(f"  {len(recd_concat_keys):,} DF/RECD concat keys loaded")
+            except Exception as e:
+                self._log(f"  ⚠ DF/RECD file read error: {e}", "warning")
+
+        # BD column exclusion
+        if bd_col:
+            bd_norm = _norm(df[bd_col])
+
+            if recd_concat_keys and inv_col and item_col and rev_col:
+                df["_key"] = (
+                    df[inv_col].fillna("").astype(str).str.strip() +
+                    df[item_col].fillna("").astype(str).str.strip() +
+                    df[rev_col].fillna("").astype(str).str.strip()
+                )
+                mask = bd_norm.str.contains(BD_NO_DF_KIT_MARKER.upper(), regex=False, na=False) & \
+                       df["_key"].isin(recd_concat_keys)
+            else:
+                mask = bd_norm.str.contains(BD_NO_DF_KIT_MARKER.upper(), regex=False, na=False)
+
+            df = df[~mask].copy()
+            df.drop(columns=["_key"], errors="ignore", inplace=True)
+            self._log(f"  BD 'No DF Kit' exclusion: {mask.sum():,} rows removed")
+
+        # Remark-based exclusion
+        if remark_col:
+            rem_norm = _norm(df[remark_col])
+            rem_mask = pd.Series(False, index=df.index)
+            for kw in REMARK_EXCLUSION_KEYWORDS:
+                rem_mask = rem_mask | rem_norm.str.contains(kw.upper(), regex=False, na=False)
+            df = df[~rem_mask].copy()
+            self._log(f"  Remark DF/RECD exclusion: {rem_mask.sum():,} rows removed")
+
+        self._log(f"  DF/RECD complete: removed {before - len(df):,} rows", "success")
+        return df
+
+    # ── Step 7: Identify eligible records ────────────────────────────────────
+    def step7_eligible_records(self, df: pd.DataFrame) -> pd.DataFrame:
+        self._log("Step 7 ▸ Identifying final eligible records …")
+        r = ColumnResolver(df.columns)
+        remark_col = r.get("remark")
+
+        # Eligible = blank Remark column OR "Yes"/"Eligible" in consider-for-vd column
+        if remark_col:
+            rem_norm = _norm(df[remark_col])
+            eligible = df[rem_norm.isin(["", "YES", "ELIGIBLE", "Y"])].copy()
+        else:
+            eligible = df.copy()
+
+        rev_col = r.get("revenue")
+        if rev_col:
+            total_sales = _to_num(eligible[rev_col]).sum()
+            self.stats["eligible_sales_cr"] = total_sales / 1e7
+        self.stats["eligible_rows"] = len(eligible)
+        self.stats["excluded_rows"] = self.stats.get("total_rows", 0) - len(eligible)
+
+        self._log(f"  Eligible records: {len(eligible):,}  |  "
+                  f"Sales: ₹{self.stats.get('eligible_sales_cr', 0):,.2f} Cr", "success")
+        return eligible
+
+    # ── Step 8: Quarterly Pivot ───────────────────────────────────────────────
+    def step8_pivot(self, eligible_df: pd.DataFrame) -> pd.DataFrame:
+        self._log("Step 8 ▸ Building quarterly pivot …")
+        r = ColumnResolver(eligible_df.columns)
+
+        dealer_col = r.get("dealer_4s")
+        rev_col    = r.get("revenue")
+        month_col  = r.get("fiscal_month")
+        split_col  = r.get("split_dealer")
+
+        if not dealer_col:
+            self._log("  ⚠ 4S Dealer column not found — basic total only", "warning")
+            return eligible_df[[]].assign(Note=["Dealer column not found"])
+
+        eligible_df[rev_col or "Revenue Amount"] = _to_num(
+            eligible_df.get(rev_col, pd.Series([0] * len(eligible_df)))
+        )
+
+        # Build index columns for pivot rows
+        row_cols = []
+        if split_col:
+            row_cols.append(split_col)
+        row_cols.append(dealer_col)
+
+        if month_col:
+            try:
+                eligible_df["_month_norm"] = _norm(eligible_df[month_col])
+                pivot = eligible_df.pivot_table(
+                    values=rev_col,
+                    index=row_cols,
+                    columns="_month_norm",
+                    aggfunc="sum",
+                    fill_value=0,
+                ).reset_index()
+                eligible_df.drop(columns=["_month_norm"], errors="ignore", inplace=True)
+
+                # Add row total
+                num_cols = [c for c in pivot.columns if c not in row_cols]
+                pivot["Quarterly Total"] = pivot[num_cols].sum(axis=1)
+                self._log(f"  Pivot: {len(pivot)} dealers × {len(num_cols)} periods", "success")
+            except Exception as e:
+                self._log(f"  ⚠ Pivot error ({e}) — using dealer totals fallback", "warning")
+                pivot = eligible_df.groupby(dealer_col)[rev_col].sum().reset_index()
+                pivot.columns = [dealer_col, "Current Quarter Sales"]
+        else:
+            pivot = eligible_df.groupby(dealer_col)[rev_col].sum().reset_index()
+            pivot.columns = [dealer_col, "Current Quarter Sales"]
+            self._log("  Fiscal Month column not found — dealer totals used", "warning")
+
+        return pivot
+
+    # ── Step 9: YOY Comparison + Slab Calculations ───────────────────────────
+    def step9_summary(self, pivot_df: pd.DataFrame, prev_year_file,
+                      dealer_list_file) -> pd.DataFrame:
+        self._log("Step 9 ▸ YOY comparison + slab calculations …")
+        r = ColumnResolver(pivot_df.columns)
+
+        # Identify the current quarter numeric columns
+        non_num_cols = [c for c in pivot_df.columns
+                        if pivot_df[c].dtype == object or c.lower() in
+                        ["4s dealer", "dealer", "split dealership", "split dealer", "zone"]]
+        curr_cols = [c for c in pivot_df.columns if c not in non_num_cols
+                     and c != "Quarterly Total"]
+
+        # Use Quarterly Total or last period col as current
+        curr_col = "Quarterly Total" if "Quarterly Total" in pivot_df.columns else (
+            curr_cols[-1] if curr_cols else pivot_df.columns[-1]
+        )
+        pivot_df[curr_col] = _to_num(pivot_df[curr_col])
+
+        # ── Load previous year summary ──
+        prev_col = "Previous Year Quarter"
+        dealer_col = None
+        for c in pivot_df.columns:
+            if any(s in c.lower() for s in ["dealer", "customer", "4s"]):
+                dealer_col = c
+                break
+
+        if prev_year_file is not None:
+            try:
+                prev_df = _read(prev_year_file)
+                pr = ColumnResolver(prev_df.columns)
+                prev_dealer = pr.get("dealer_4s") or pr.get("customer_no") or prev_df.columns[0]
+
+                # Find a numeric col representing prev year Q4 sales
+                prev_rev_candidates = [
+                    c for c in prev_df.columns
+                    if any(k in c.lower() for k in ["q4", "quarter", "amount", "sales", "revenue"])
+                ]
+                prev_rev_col = prev_rev_candidates[0] if prev_rev_candidates else prev_df.columns[-1]
+
+                prev_summary = prev_df.groupby(prev_dealer)[prev_rev_col].apply(
+                    lambda s: pd.to_numeric(s, errors="coerce").sum()
+                ).reset_index()
+                prev_summary.columns = [dealer_col or "4S Dealer", prev_col]
+
+                if dealer_col:
+                    pivot_df = pivot_df.merge(prev_summary, on=dealer_col, how="left")
+                    pivot_df[prev_col] = _to_num(pivot_df[prev_col])
+                    self._log("  Previous year data merged", "success")
+                else:
+                    pivot_df[prev_col] = 0.0
+            except Exception as e:
+                self._log(f"  ⚠ Previous year merge error: {e} — using 0", "warning")
+                pivot_df[prev_col] = 0.0
+        else:
+            pivot_df[prev_col] = 0.0
+            self._log("  No previous year file — YOY baseline = 0", "warning")
+
+        # ── Calculations ──
+        pivot_df["Increase / (Decrease)"] = pivot_df[curr_col] - pivot_df[prev_col]
+
+        prev_safe = pivot_df[prev_col].replace(0, np.nan)
+        pivot_df["Growth %"] = (
+            (pivot_df["Increase / (Decrease)"] / prev_safe * 100)
+            .replace([np.inf, -np.inf], 0).fillna(0)
+        )
+
+        # Discount % from quarterly slab (based on Growth %)
+        pivot_df["Discount %"] = pivot_df["Growth %"].apply(self._get_q_slab_discount)
+        pivot_df["Discount Value"] = (
+            pivot_df[curr_col] * pivot_df["Discount %"] / 100
+        ).replace([np.inf, -np.inf], 0).fillna(0)
+
+        # Sanitise all numeric cols
+        for c in pivot_df.select_dtypes(include=[np.number]).columns:
+            pivot_df[c] = pivot_df[c].replace([np.inf, -np.inf], 0).fillna(0)
+
+        self._log("  Calculations done: Increase, Growth%, Discount%, Discount Value", "success")
+        return pivot_df
+
+    def _get_q_slab_discount(self, growth_pct: float) -> float:
+        """Look up incentive payout from quarterly slab based on Growth %."""
+        g = _safe(growth_pct)
+        for _, row in self.q_slab_df.iterrows():
+            try:
+                lo = float(row.get("Growth Over 2024 Min (%)", 0) or 0)
+                raw_hi = row.get("Growth Over 2024 Max (%)", "")
+                hi = float(raw_hi) if str(raw_hi).strip() not in ["", "nan"] else 1e9
+                if lo <= g < hi:
+                    return float(row.get("Incentive Payout (%)", 0) or 0)
+            except Exception:
+                continue
+        return 0.0
+
+    # ── Step 10: Excel Output ─────────────────────────────────────────────────
+    def step10_excel(self, pivot_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
+        self._log("Step 10 ▸ Generating Excel output …")
+        out = BytesIO()
+
+        PCT_COLS   = {"Growth %", "Discount %"}
+        MONEY_COLS = {
+            "Quarterly Total", "Previous Year Quarter",
+            "Increase / (Decrease)", "Discount Value", "Current Quarter Sales",
+        }
+        # Also treat any column with "Q4", "Q3", "Q1", "Q2", "QUARTER", "MONTH" as money
+        def _is_money(col, df):
+            if col in MONEY_COLS:
+                return True
+            if any(k in col.upper() for k in ["QUARTER", "MONTH", "TOTAL", "SALES", "AMOUNT", "REVENUE"]):
+                return True
+            if df[col].dtype in [np.float64, np.int64, float, int]:
+                return True
+            return False
+
+        NAVY   = "#1E3A5F"
+        BLUE   = "#2D6A9F"
+        ALT    = "#F0F6FF"
+        WHITE  = "#FFFFFF"
+        GOLD   = "#C9A84C"
+        DKGREY = "#374151"
+
+        with xlsxwriter.Workbook(out, {"nan_inf_to_errors": True}) as wb:
+            ts = datetime.now().strftime("%d %b %Y  %H:%M")
+
+            def _fmt(**kw):
+                return wb.add_format(kw)
+
+            F = {
+                "title":    _fmt(bold=True, font_size=14, font_color=NAVY, align="center", valign="vcenter"),
+                "subtitle": _fmt(italic=True, font_size=9, font_color="#888888", align="center"),
+                "hdr":      _fmt(bold=True, bg_color=NAVY, font_color=WHITE, border=1,
+                                 align="center", valign="vcenter", text_wrap=True),
+                "subhdr":   _fmt(bold=True, bg_color=BLUE, font_color=WHITE, border=1, align="center"),
+                "cell":     _fmt(border=1, align="left", font_color=DKGREY),
+                "cell_a":   _fmt(border=1, align="left", bg_color=ALT, font_color=DKGREY),
+                "num":      _fmt(border=1, num_format="#,##0.00", font_color=DKGREY),
+                "num_a":    _fmt(border=1, num_format="#,##0.00", bg_color=ALT, font_color=DKGREY),
+                "pct":      _fmt(border=1, num_format='0.00"%"', font_color=DKGREY),
+                "pct_a":    _fmt(border=1, num_format='0.00"%"', bg_color=ALT, font_color=DKGREY),
+                "tot":      _fmt(bold=True, bg_color=NAVY, font_color=WHITE, border=1, num_format="#,##0.00"),
+                "tot_lbl":  _fmt(bold=True, bg_color=NAVY, font_color=WHITE, border=1),
+                "tot_pct":  _fmt(bold=True, bg_color=NAVY, font_color=WHITE, border=1, num_format='0.00"%"'),
+            }
+
+            def _write_sheet(ws, df, title, is_summary=False):
+                nc = len(df.columns)
+                # Title band
+                ws.merge_range(0, 0, 0, nc-1, title, F["title"])
+                ws.set_row(0, 24)
+                ws.merge_range(1, 0, 1, nc-1, f"Forest Dealerships  |  {ts}", F["subtitle"])
+                ws.set_row(1, 14)
+
+                # Headers
+                for ci, cn in enumerate(df.columns):
+                    ws.write(2, ci, str(cn), F["hdr"])
+                ws.set_row(2, 30)
+                ws.freeze_panes(3, 1)
+
+                # Data rows
+                for ri, (_, row) in enumerate(df.iterrows()):
+                    alt = ri % 2 == 1
+                    for ci, cn in enumerate(df.columns):
+                        raw = row[cn]
+                        if isinstance(raw, float) and (pd.isna(raw) or np.isinf(raw)):
+                            raw = 0.0
+
+                        if cn in PCT_COLS:
+                            v = _safe(raw)
+                            ws.write(3 + ri, ci, v, F["pct_a"] if alt else F["pct"])
+                        elif _is_money(cn, df) and isinstance(raw, (int, float)):
+                            v = _safe(raw)
+                            ws.write(3 + ri, ci, v, F["num_a"] if alt else F["num"])
+                        else:
+                            ws.write(3 + ri, ci, str(raw) if raw is not None else "",
+                                     F["cell_a"] if alt else F["cell"])
+
+                    # Set column widths
+                for ci, cn in enumerate(df.columns):
+                    ws.set_column(ci, ci, max(16, len(str(cn)) + 3))
+
+                # Totals row
+                last = 3 + len(df)
+                ws.write(last, 0, "GRAND TOTAL", F["tot_lbl"])
+                for ci, cn in enumerate(df.columns[1:], 1):
+                    col_data = pd.to_numeric(df[cn], errors="coerce").fillna(0)
+                    if cn in PCT_COLS:
+                        avg = _safe(col_data.mean())
+                        ws.write(last, ci, avg, F["tot_pct"])
+                    elif _is_money(cn, df):
+                        ws.write(last, ci, _safe(col_data.sum()), F["tot"])
+                    else:
+                        ws.write(last, ci, "", F["tot_lbl"])
+
+                return last
+
+            # Sheet 1: Quarterly Pivot
+            ws1 = wb.add_worksheet("Quarterly Pivot")
+            _write_sheet(ws1, pivot_df, "VLDS Q4 2025 — Quarterly Sales Pivot (4S Dealers)")
+
+            # Sheet 2: Final Summary
+            ws2 = wb.add_worksheet("Final Summary")
+            _write_sheet(ws2, summary_df, "VLDS Q4 2025 — Final Incentive Summary", is_summary=True)
+
+        out.seek(0)
+        self._log("  Excel ready  ✓", "success")
+        return out.getvalue()
+
+    # ── Main Pipeline ─────────────────────────────────────────────────────────
+    def run(self, vlds_file, df_recd_file, prev_year_file, dealer_list_file,
+            progress_cb=None):
+        def _p(pct, msg):
+            if progress_cb:
+                progress_cb(pct, msg)
+
+        _p(5,  "Loading VLDS Q4 2025 file …")
+        df = self.step1_load(vlds_file)
+
+        _p(15, "Applying LOB & Sub-LOB eligibility …")
+        df = self.step2_lob_eligibility(df)
+
+        _p(27, "Applying batch source & item exclusions …")
+        df = self.step3_batch_item_exclusions(df)
+
+        _p(36, "Checking Credit Memo-Misc eligibility …")
+        df = self.step4_credit_memo_eligibility(df)
+
+        _p(47, "Applying exclusion list (49 criteria) …")
+        df = self.step5_exclusion_list(df)
+
+        _p(58, "Processing DF/RECD exclusions …")
+        df = self.step6_df_recd(df, df_recd_file)
+
+        _p(67, "Identifying eligible records …")
+        eligible = self.step7_eligible_records(df)
+
+        _p(76, "Building quarterly pivot …")
+        pivot = self.step8_pivot(eligible.copy())
+
+        _p(86, "YOY comparison & slab calculations …")
+        summary = self.step9_summary(pivot.copy(), prev_year_file, dealer_list_file)
+
+        _p(95, "Writing Excel output …")
+        output = self.step10_excel(pivot, summary)
+
+        _p(100, "Complete ✓")
+        return output, self.log, self.stats
+
+
 
