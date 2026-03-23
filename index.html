@@ -1,1 +1,387 @@
 
+# app.py | VLDS Quarterly Incentive Processor — Forest Dealerships
+# Run:  streamlit run app.py
+
+import streamlit as st
+import pandas as pd
+import traceback
+
+from utils import parse_excl, parse_slab
+from processor import Processor
+
+# ── Fallback defaults (inline so no config import needed in app.py) ──────────
+FALLBACK_EXCL = [
+    {"Sr. No": 1,  "Particulars": "Credit Note",           "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 2,  "Particulars": "Debit Note",            "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 3,  "Particulars": "Stock Transfer",        "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 4,  "Particulars": "Internal Transfer",     "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 5,  "Particulars": "Purchase Return",       "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 6,  "Particulars": "Cancelled Invoice",     "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 7,  "Particulars": "Proforma Invoice",      "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 8,  "Particulars": "Sample Invoice",        "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 9,  "Particulars": "Auto Parts",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 10, "Particulars": "Battery",               "Item No": "AX00000000", "Apply To": "Line Item Description"},
+    {"Sr. No": 11, "Particulars": "Datum",                 "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 12, "Particulars": "Lubricants",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 13, "Particulars": "Accessories",           "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 14, "Particulars": "AMC",                   "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 15, "Particulars": "Extended Warranty",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 16, "Particulars": "Insurance",             "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 17, "Particulars": "Finance Charges",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 18, "Particulars": "Stamp Duty",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 19, "Particulars": "Handling Charges",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 20, "Particulars": "PDI Charges",           "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 21, "Particulars": "Freight Outward",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 22, "Particulars": "Transit Insurance",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 23, "Particulars": "Labour",                "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 24, "Particulars": "Logistics Charges",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 25, "Particulars": "Packing Charges",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 26, "Particulars": "Loading / Unloading",   "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 27, "Particulars": "Storage Charges",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 28, "Particulars": "Delivery Charges",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 29, "Particulars": "Processing Fee",        "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 30, "Particulars": "Depot Sales (DPT)",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 31, "Particulars": "Miscellaneous",         "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 32, "Particulars": "Early Payment Discount","Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 33, "Particulars": "Incentive to Engineer", "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 34, "Particulars": "RMA Credit Notes",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 35, "Particulars": "Rebate",                "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 36, "Particulars": "Subsidy",               "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 37, "Particulars": "DDS Acoustics",         "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 38, "Particulars": "Price Support",         "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 39, "Particulars": "Discount on Sale",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 40, "Particulars": "MEIS",                  "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 41, "Particulars": "SEIS",                  "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 42, "Particulars": "Commission",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 43, "Particulars": "Service Charge",        "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 44, "Particulars": "Advance",               "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 45, "Particulars": "Security Deposit",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 46, "Particulars": "EMD",                   "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 47, "Particulars": "Registration Charges",  "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 48, "Particulars": "Hypothecation Charges", "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 49, "Particulars": "Documentation Charges", "Item No": "NA", "Apply To": "Line Item Description"},
+]
+FALLBACK_SLABS = [
+    {"Min Growth (%)":  0,   "Max Growth (%)":  5,   "Incentive Payout (%)": 1.00},
+    {"Min Growth (%)":  5,   "Max Growth (%)": 10,   "Incentive Payout (%)": 1.50},
+    {"Min Growth (%)": 10,   "Max Growth (%)": 15,   "Incentive Payout (%)": 2.00},
+    {"Min Growth (%)": 15,   "Max Growth (%)": 20,   "Incentive Payout (%)": 2.50},
+    {"Min Growth (%)": 20,   "Max Growth (%)": 9999, "Incentive Payout (%)": 3.00},
+]
+
+st.set_page_config(
+    page_title="VLDS Incentive Processor",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─── CSS ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"] { background: #F0F2F5; }
+section.main { padding: 1.5rem 2.5rem 3rem; }
+
+/* ── Top bar ── */
+.topbar {
+    background: #0d2847;
+    border-radius: 10px;
+    padding: 1rem 1.8rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.6rem;
+}
+.topbar-title { color: #fff; font-size: 1.35rem; font-weight: 800;
+                letter-spacing: -0.3px; }
+.topbar-sub   { color: rgba(255,255,255,0.6); font-size: .8rem; }
+.topbar-badge {
+    background: rgba(255,255,255,0.12);
+    color: #fff; border-radius: 20px;
+    padding: 4px 14px; font-size: .75rem; font-weight: 700;
+    border: 1px solid rgba(255,255,255,0.25);
+}
+
+/* ── File row ── */
+.file-table {
+    background: #fff;
+    border-radius: 10px;
+    border: 1px solid #E2E8F0;
+    overflow: hidden;
+    margin-bottom: 1.2rem;
+}
+.file-row {
+    display: flex;
+    align-items: center;
+    padding: 0 1rem;
+    border-bottom: 1px solid #F1F5F9;
+    min-height: 58px;
+    gap: 1rem;
+}
+.file-row:last-child { border-bottom: none; }
+.file-row-header {
+    background: #F8FAFC;
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .8px;
+    text-transform: uppercase;
+    color: #94A3B8;
+    padding: 0.45rem 1rem;
+    display: flex;
+    gap: 1rem;
+    border-bottom: 1px solid #E2E8F0;
+}
+.file-label {
+    min-width: 280px;
+    font-size: .82rem;
+    font-weight: 600;
+    color: #1E3A5F;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+}
+.tag-req { font-size: .58rem; font-weight: 700; color: #DC2626;
+           background: #FEE2E2; border-radius: 4px; padding: 1px 5px; }
+.tag-opt { font-size: .58rem; font-weight: 700; color: #059669;
+           background: #D1FAE5; border-radius: 4px; padding: 1px 5px; }
+.tag-ok  { font-size: .58rem; font-weight: 700; color: #1D4ED8;
+           background: #DBEAFE; border-radius: 4px; padding: 1px 5px; }
+.drop-hint { font-size: .7rem; color: #94A3B8; }
+.file-limit { font-size: .65rem; color: #CBD5E1; }
+
+/* ── Run button ── */
+div[data-testid="stButton"] > button[kind="primary"] {
+    background: #0d2847 !important;
+    color: #fff !important; border: none !important;
+    border-radius: 8px !important; font-weight: 700 !important;
+    font-size: .95rem !important; padding: .7rem 2.5rem !important;
+    letter-spacing: .2px;
+}
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+    background: #1a5c9e !important;
+}
+
+/* ── Download button ── */
+div[data-testid="stDownloadButton"] > button {
+    background: #059669 !important; color: #fff !important;
+    border: none !important; border-radius: 8px !important;
+    font-weight: 700 !important; font-size: .95rem !important;
+    padding: .7rem 2rem !important; width: 100% !important;
+}
+
+/* ── Result strip ── */
+.result-strip {
+    background: #fff;
+    border: 1px solid #E2E8F0;
+    border-left: 4px solid #059669;
+    border-radius: 8px;
+    padding: .8rem 1.2rem;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    margin-bottom: 1rem;
+}
+.rs-item { text-align: center; }
+.rs-val  { font-size: 1.3rem; font-weight: 800; }
+.rs-lbl  { font-size: .68rem; color: #6B7280; }
+
+/* ── Log ── */
+.log-box {
+    background: #0f172a;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: .78rem;
+}
+.log-ok   { color: #4ade80; }
+.log-warn { color: #fbbf24; }
+.log-err  { color: #f87171; }
+.log-info { color: #94a3b8; }
+
+#MainMenu, footer, header { visibility: hidden; }
+div[data-testid="stDecoration"] { display: none; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─── Session state ────────────────────────────────────────────────────────────
+for k, v in {"files": {}, "result": None, "logs": [], "stats": {}}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+S = st.session_state
+
+# ─── Top bar ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="topbar">
+  <div>
+    <div class="topbar-title">🚗 &nbsp;VLDS Quarterly Incentive Processor</div>
+    <div class="topbar-sub">Forest Dealerships &nbsp;·&nbsp;
+      4S Dealer Eligibility &amp; Incentive Summary</div>
+  </div>
+  <span class="topbar-badge">Q4 · 2025</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ─── File definitions ─────────────────────────────────────────────────────────
+FILE_DEFS = [
+    ("vlds_main",   "📊", "VLDS Q4 2025 — Main File",               True),
+    ("df_recd",     "🔗", "DF & RECD Q4 Oct-Dec File",              True),
+    ("prev_year",   "📅", "VLDS Q4 2024 — Previous Year Summary",   True),
+    ("dealer_list", "🏪", "4S Dealer List",                         False),
+    ("excl_file",   "📋", "Exclusion List File",                    False),
+    ("slab_file",   "📈", "Slab Table File",                        False),
+    ("base_data",   "🗂️", "Base Data File",                          False),
+]
+
+# ─── File upload table ────────────────────────────────────────────────────────
+st.markdown('<div class="file-table">', unsafe_allow_html=True)
+st.markdown("""
+<div class="file-row-header">
+  <span style="min-width:280px;">File</span>
+  <span style="flex:1;">Upload &nbsp;·&nbsp; Drag &amp; Drop or Browse &nbsp;·&nbsp;
+    Max 200 MB &nbsp;·&nbsp; .xlsx · .xls · .csv</span>
+</div>
+""", unsafe_allow_html=True)
+
+for key, icon, label, req in FILE_DEFS:
+    loaded = key in S.files
+    req_tag = '<span class="tag-req">Required</span>' if req else '<span class="tag-opt">Optional</span>'
+    ok_tag  = '<span class="tag-ok">✓ Loaded</span>' if loaded else ""
+
+    c1, c2 = st.columns([3, 6], gap="small")
+    with c1:
+        st.markdown(
+            f'<div class="file-label">'
+            f'<span>{icon}</span><span>{label}</span>'
+            f'&nbsp;{req_tag} {ok_tag}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        up = st.file_uploader(
+            key,
+            type=["xlsx", "xls", "csv"],
+            key=f"fu_{key}",
+            label_visibility="collapsed",
+        )
+        if up:
+            if up.size > 209_715_200:   # 200 MB
+                st.error(f"'{up.name}' exceeds 200 MB limit.")
+            else:
+                S.files[key] = up
+                st.toast(f"✅  {up.name}")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ─── Action row ───────────────────────────────────────────────────────────────
+req_keys  = ["vlds_main", "df_recd", "prev_year"]
+all_ready = all(k in S.files for k in req_keys)
+
+col_run, col_dl, col_status = st.columns([2, 2, 3], gap="medium")
+
+with col_run:
+    run_clicked = st.button(
+        "🚀  Run VLDS Processing",
+        type="primary",
+        disabled=not all_ready,
+        use_container_width=True,
+    )
+
+with col_dl:
+    if S.result:
+        st.download_button(
+            "📥  Download Report (Excel)",
+            data=S.result,
+            file_name="VLDS_Q4_2025_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    else:
+        st.button("📥  Download Report (Excel)",
+                  disabled=True, use_container_width=True)
+
+with col_status:
+    if not all_ready:
+        missing = [label for k, _, label, req in FILE_DEFS
+                   if req and k not in S.files]
+        st.warning("  ·  ".join(f"⚠ {m}" for m in missing), icon=None)
+    elif S.result:
+        stats = S.stats
+        st.markdown(
+            f'<div class="result-strip">'
+            f'<div class="rs-item"><div class="rs-val" style="color:#4F46E5">'
+            f'{stats.get("total",0):,}</div>'
+            f'<div class="rs-lbl">Total Rows</div></div>'
+            f'<div class="rs-item"><div class="rs-val" style="color:#059669">'
+            f'{stats.get("elig",0):,}</div>'
+            f'<div class="rs-lbl">Eligible</div></div>'
+            f'<div class="rs-item"><div class="rs-val" style="color:#DC2626">'
+            f'{stats.get("excl",0):,}</div>'
+            f'<div class="rs-lbl">Excluded</div></div>'
+            f'<div class="rs-item"><div class="rs-val" style="color:#D97706">'
+            f'₹{stats.get("sales_cr",0):,.1f} Cr</div>'
+            f'<div class="rs-lbl">Eligible Sales</div></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Upload required files and click Run.")
+
+# ─── Processing ───────────────────────────────────────────────────────────────
+if run_clicked:
+    S.result = None
+    S.logs   = []
+    S.stats  = {}
+
+    prog = st.progress(0, text="Starting …")
+    lbl  = st.empty()
+
+    def cb(pct, msg):
+        prog.progress(pct, text=msg)
+        lbl.markdown(f"⚙️ **{msg}**")
+
+    try:
+        excl = (parse_excl(S.files["excl_file"])
+                if "excl_file" in S.files else pd.DataFrame(FALLBACK_EXCL))
+        slab = (parse_slab(S.files["slab_file"])
+                if "slab_file" in S.files else pd.DataFrame(FALLBACK_SLABS))
+
+        proc = Processor(excl, slab)
+        out, logs, stats = proc.run(
+            S.files.get("vlds_main"),
+            S.files.get("df_recd"),
+            S.files.get("prev_year"),
+            S.files.get("dealer_list"),
+            cb=cb,
+        )
+        S.result = out
+        S.logs   = logs
+        S.stats  = stats
+        prog.progress(100, text="Done ✓")
+        lbl.success("✅  Processing complete — click Download Report")
+        st.balloons()
+        st.rerun()
+
+    except Exception as e:
+        prog.empty()
+        lbl.error(f"❌  {e}")
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+
+# ─── Processing log ───────────────────────────────────────────────────────────
+if S.logs:
+    with st.expander(
+        "📋  Processing Log  — open if output looks wrong",
+        expanded=(S.result is None)
+    ):
+        lines_html = ""
+        for e in S.logs:
+            msg = str(e["msg"]).replace("<", "&lt;").replace(">", "&gt;")
+            lv  = e["lv"]
+            css = "log-ok" if lv == "success" else \
+                  "log-warn" if lv == "warning" else \
+                  "log-err" if lv == "error" else "log-info"
+            lines_html += f'<div class="{css}">{msg}</div>\n'
+        st.markdown(f'<div class="log-box">{lines_html}</div>',
+                    unsafe_allow_html=True)
