@@ -1,1 +1,1488 @@
+# app.py  |  VLDS Quarterly Incentive Processor — Forest Dealerships
+# Single-file: all logic merged — run with:
+#   pip install streamlit pandas numpy xlsxwriter openpyxl
+#   streamlit run app.py
+# ═══════════════════════════════════════════════════════════════
 
+import streamlit as st
+import pandas as pd
+import numpy as np
+from io import BytesIO
+from datetime import datetime
+import traceback
+import re
+import xlsxwriter
+
+# ─── CONFIG ─────────────────────────────────────────────────────────────────
+
+# config.py | VLDS Quarterly Incentive Processor — Forest Dealerships
+# ─────────────────────────────────────────────────────────────────────────────
+# All column synonyms, defaults, and constants live here.
+# Add any alternative column names your client uses to the lists below.
+
+# ── Column synonym map ────────────────────────────────────────────────────────
+# key → list of possible column header names (lowercase, stripped)
+COL_SYNS = {
+    "lob":          ["lob", "line of business"],
+    "sub_lob":      ["sub lob", "sublob", "sub-lob", "sub lob description"],
+    "segment":      ["segment", "cust segment"],
+    "inv_type":     ["invoice type", "invoicetype", "order header subtype code",
+                     "transaction type", "inv type"],
+    "batch_src":    ["batch source", "batchsource", "batch_source"],
+    "item":         ["item", "item number", "item_number", "item code", "item no"],
+    "line_item":    ["line item", "line item description",
+                     "inventory item description", "item description"],
+    "revenue":      ["revenue amount", "revenue_amount", "rev amount",
+                     "net revenue", "net amount"],
+    "inv_no":       ["invoice number", "invoice_number", "invoice no",
+                     "inv number", "inv no"],
+    "cust_name":    ["customer account name", "customer name", "customername",
+                     "cust name", "account name", "dealer name"],
+    "cust_no":      ["customer account number", "customer number",
+                     "customer_number", "customer no", "cust no",
+                     "account number", "dealer number",
+                     "customer acct number", "customer account no"],
+    "month":        ["reporting to fiscal month", "reporting fiscal month name",
+                     "reporting fiscal month", "fiscal month", "cmi month",
+                     "month", "period", "reporting period",
+                     "reporting to fiscal month name"],
+    "zone":         ["zone", "region", "territory"],
+    "bd":           ["bd", "b.d", "b.d."],
+    "consider_vd":  ["consider for vd", "consider for vlds",
+                     "eligible sales/ not eligible",
+                     "eligible sales/not eligible",
+                     "eligible", "vlds eligible", "consider"],
+    # Previous year summary file
+    "prev_q4":      ["q4-24", "q4 24", "q4_24", "q424",
+                     "final amount q4-24", "final amount q4 24",
+                     "final q4-24", "previous quarter", "prev q4",
+                     "q4-2024", "q4 2024"],
+}
+
+# Flat set used for header-row detection
+ALL_KNOWN_LOWER = set()
+for _lst in COL_SYNS.values():
+    for _v in _lst:
+        ALL_KNOWN_LOWER.add(_v.lower().strip())
+
+# ── Default exclusion list (49 criteria) ──────────────────────────────────────
+# First 8  → Transaction Type / Invoice Type column
+# Rest     → Line Item Description column  (Item No also cross-checked)
+FALLBACK_EXCL = [
+    {"Sr. No": 1,  "Particulars": "Credit Note",           "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 2,  "Particulars": "Debit Note",            "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 3,  "Particulars": "Stock Transfer",        "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 4,  "Particulars": "Internal Transfer",     "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 5,  "Particulars": "Purchase Return",       "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 6,  "Particulars": "Cancelled Invoice",     "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 7,  "Particulars": "Proforma Invoice",      "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 8,  "Particulars": "Sample Invoice",        "Item No": "NA", "Apply To": "Transaction Type / Invoice Type"},
+    {"Sr. No": 9,  "Particulars": "Auto Parts",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 10, "Particulars": "Battery",               "Item No": "AX00000000", "Apply To": "Line Item Description"},
+    {"Sr. No": 11, "Particulars": "Datum",                 "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 12, "Particulars": "Lubricants",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 13, "Particulars": "Accessories",           "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 14, "Particulars": "AMC",                   "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 15, "Particulars": "Extended Warranty",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 16, "Particulars": "Insurance",             "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 17, "Particulars": "Finance Charges",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 18, "Particulars": "Stamp Duty",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 19, "Particulars": "Handling Charges",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 20, "Particulars": "PDI Charges",           "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 21, "Particulars": "Freight Outward",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 22, "Particulars": "Transit Insurance",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 23, "Particulars": "Labour",                "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 24, "Particulars": "Logistics Charges",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 25, "Particulars": "Packing Charges",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 26, "Particulars": "Loading / Unloading",   "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 27, "Particulars": "Storage Charges",       "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 28, "Particulars": "Delivery Charges",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 29, "Particulars": "Processing Fee",        "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 30, "Particulars": "Depot Sales (DPT)",     "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 31, "Particulars": "Miscellaneous",         "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 32, "Particulars": "Early Payment Discount","Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 33, "Particulars": "Incentive to Engineer", "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 34, "Particulars": "RMA Credit Notes",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 35, "Particulars": "Rebate",                "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 36, "Particulars": "Subsidy",               "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 37, "Particulars": "DDS Acoustics",         "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 38, "Particulars": "Price Support",         "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 39, "Particulars": "Discount on Sale",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 40, "Particulars": "MEIS",                  "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 41, "Particulars": "SEIS",                  "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 42, "Particulars": "Commission",            "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 43, "Particulars": "Service Charge",        "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 44, "Particulars": "Advance",               "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 45, "Particulars": "Security Deposit",      "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 46, "Particulars": "EMD",                   "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 47, "Particulars": "Registration Charges",  "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 48, "Particulars": "Hypothecation Charges", "Item No": "NA", "Apply To": "Line Item Description"},
+    {"Sr. No": 49, "Particulars": "Documentation Charges", "Item No": "NA", "Apply To": "Line Item Description"},
+]
+
+# ── Default slab table ────────────────────────────────────────────────────────
+FALLBACK_SLABS = [
+    {"Min Growth (%)":  0,    "Max Growth (%)":  5,    "Incentive Payout (%)": 1.00},
+    {"Min Growth (%)":  5,    "Max Growth (%)": 10,    "Incentive Payout (%)": 1.50},
+    {"Min Growth (%)": 10,    "Max Growth (%)": 15,    "Incentive Payout (%)": 2.00},
+    {"Min Growth (%)": 15,    "Max Growth (%)": 20,    "Incentive Payout (%)": 2.50},
+    {"Min Growth (%)": 20,    "Max Growth (%)": 9999,  "Incentive Payout (%)": 3.00},
+]
+
+
+# ─── UTILITIES ──────────────────────────────────────────────────────────────
+
+# utils.py | File I/O, column resolution, number helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Column name cleaning ──────────────────────────────────────────────────────
+
+def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Fix NaN/float headers, strip whitespace, drop all-empty columns."""
+    cols, seen = [], {}
+    for i, c in enumerate(df.columns):
+        nm = f"Unnamed_{i}" if (isinstance(c, float) and pd.isna(c)) else str(c).strip()
+        if nm in seen:
+            seen[nm] += 1
+            nm = f"{nm}_{seen[nm]}"
+        else:
+            seen[nm] = 0
+        cols.append(nm)
+    df.columns = cols
+    return df.dropna(axis=1, how="all")
+
+
+def _score_row(row) -> int:
+    """Count how many cells in a row match known column names."""
+    return sum(1 for v in row if pd.notna(v) and str(v).strip().lower() in ALL_KNOWN_LOWER)
+
+
+def _find_header_row(fobj, sheet_name=0) -> int:
+    """Scan first 10 rows to find which row has the most recognised column names."""
+    try:
+        raw = pd.read_excel(fobj, sheet_name=sheet_name,
+                            header=None, nrows=10, dtype=str)
+        best_row, best_score = 0, 0
+        for i, row in raw.iterrows():
+            s = _score_row(row)
+            if s > best_score:
+                best_score, best_row = s, i
+        return int(best_row)
+    except Exception:
+        return 0
+
+
+# ── File reading ──────────────────────────────────────────────────────────────
+
+def load_file(fobj, sheet_kws=None) -> pd.DataFrame:
+    """
+    Read uploaded Excel/CSV.
+    Auto-detects header row (handles title/blank rows at top of Excel files).
+    Always cleans column headers.
+    """
+    if fobj is None:
+        return None
+    fobj.seek(0)
+    fname = fobj.name.lower()
+
+    if fname.endswith(".csv"):
+        try:
+            return clean_cols(pd.read_csv(fobj, dtype=str))
+        except Exception:
+            fobj.seek(0)
+            return clean_cols(pd.read_csv(fobj, dtype=str, encoding="latin-1"))
+
+    # Find correct sheet
+    sheet_to_use = 0
+    if sheet_kws:
+        try:
+            fobj.seek(0)
+            xl = pd.ExcelFile(fobj)
+            for sh in xl.sheet_names:
+                for kw in sheet_kws:
+                    if kw.lower() in sh.lower():
+                        sheet_to_use = sh
+                        break
+                if sheet_to_use != 0:
+                    break
+        except Exception:
+            pass
+
+    # Detect header row
+    fobj.seek(0)
+    hdr = _find_header_row(fobj, sheet_name=sheet_to_use)
+    fobj.seek(0)
+    return clean_cols(pd.read_excel(fobj, sheet_name=sheet_to_use,
+                                    header=hdr, dtype=str))
+
+
+# ── Column resolution ─────────────────────────────────────────────────────────
+
+def fc(df_cols, key: str):
+    """
+    Find actual column name for a logical key using COL_SYNS.
+    Exact match first, then partial match fallback.
+    Returns None if not found.
+    """
+    syns = COL_SYNS.get(key, [key.lower()])
+    lc = {}
+    for c in df_cols:
+        s = "" if (isinstance(c, float) and pd.isna(c)) else str(c).strip()
+        lc[s.lower()] = c
+    # Exact
+    for s in syns:
+        if s.strip().lower() in lc:
+            return lc[s.strip().lower()]
+    # Partial
+    for s in syns:
+        t = s.strip().lower()
+        for col_lower, col_real in lc.items():
+            if t in col_lower or col_lower in t:
+                return col_real
+    return None
+
+
+# ── Number helpers ────────────────────────────────────────────────────────────
+
+def N(s: pd.Series) -> pd.Series:
+    """Normalise: strip + uppercase."""
+    return s.fillna("").astype(str).str.strip().str.upper()
+
+
+def to_num_safe(s: pd.Series) -> pd.Series:
+    """Convert to numeric, stripping commas first (handles Indian/formatted numbers)."""
+    return pd.to_numeric(
+        s.astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce"
+    ).fillna(0.0)
+
+
+def SF(v) -> float:
+    """Safe float: return 0.0 for NaN/Inf."""
+    try:
+        f = float(v)
+        return 0.0 if (pd.isna(f) or np.isinf(f)) else f
+    except Exception:
+        return 0.0
+
+
+def clean_num_str(s) -> float:
+    """Parse formatted number strings: commas, bracketed negatives, etc."""
+    try:
+        v = str(s).strip().replace(",", "").replace(" ", "")
+        if v.startswith("(") and v.endswith(")"):
+            v = "-" + v[1:-1]
+        f = float(v)
+        return 0.0 if (pd.isna(f) or np.isinf(f)) else f
+    except Exception:
+        return 0.0
+
+
+# ── Parse uploaded exclusion / slab files ─────────────────────────────────────
+
+def parse_excl(fobj) -> pd.DataFrame:
+    """Parse uploaded exclusion list file. Falls back to built-in 49 criteria."""
+    df = load_file(fobj)
+    if df is None or df.empty:
+        return pd.DataFrame(FALLBACK_EXCL)
+    pc = next((c for c in df.columns if any(k in c.lower() for k in
+               ["particular", "description", "keyword", "criteria"])), None)
+    ic = next((c for c in df.columns if "item" in c.lower() and
+               any(k in c.lower() for k in ["no", "number", "applicable", "code"])), None)
+    cc = next((c for c in df.columns if any(k in c.lower() for k in
+               ["column", "apply", "filter applied", "where"])), None)
+    if not pc:
+        return pd.DataFrame(FALLBACK_EXCL)
+    out = pd.DataFrame()
+    out["Sr. No"]   = range(1, len(df) + 1)
+    out["Particulars"] = df[pc].fillna("").astype(str).str.strip()
+    out["Item No"]  = df[ic].fillna("NA").astype(str).str.strip() if ic else "NA"
+    out["Apply To"] = (df[cc].fillna("Line Item Description").astype(str).str.strip()
+                       if cc else "Line Item Description")
+    return out[out["Particulars"].str.len() > 0].reset_index(drop=True)
+
+
+def parse_slab(fobj) -> pd.DataFrame:
+    """Parse uploaded slab table. Falls back to built-in defaults."""
+    df = load_file(fobj)
+    if df is None or df.empty:
+        return pd.DataFrame(FALLBACK_SLABS)
+    mc = next((c for c in df.columns if "min" in c.lower()), None)
+    xc = next((c for c in df.columns if "max" in c.lower()), None)
+    pc = next((c for c in df.columns if any(k in c.lower() for k in
+               ["payout", "incentive", "discount", "rate"])), None)
+    if not (mc and xc and pc):
+        return pd.DataFrame(FALLBACK_SLABS)
+    return pd.DataFrame({
+        "Min Growth (%)":      pd.to_numeric(df[mc], errors="coerce").fillna(0),
+        "Max Growth (%)":      pd.to_numeric(df[xc], errors="coerce").fillna(9999),
+        "Incentive Payout (%)": pd.to_numeric(df[pc], errors="coerce").fillna(0),
+    }).dropna().reset_index(drop=True)
+
+
+# ─── PROCESSOR ──────────────────────────────────────────────────────────────
+
+# processor.py | VLDS Processing Pipeline — Forest Dealerships
+# ─────────────────────────────────────────────────────────────────────────────
+# Steps 1-10:
+#  1  Load VLDS Q4 2025 file
+#  2  LOB / Sub-LOB / Segment / AUTO eligibility
+#  3  DDS-Acoustics + Battery exclusion
+#  4  Credit Memo-Misc eligibility
+#  5  Exclusion list (49 criteria)
+#  6  DF/RECD exclusion (concat keys + Remark)
+#  7  Finalise eligible records
+#  8  Quarterly Pivot  (Customer × Month, Grand Total col + row)
+#  9  Final Summary    (Q4-25 vs Q4-24, Increase, Growth%, Discount%, Discount Value)
+# 10  Excel output     (3 sheets: Pivot, Summary, Eligible Data for client review)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+
+
+class Processor:
+
+    def __init__(self, excl_df: pd.DataFrame, slab_df: pd.DataFrame):
+        self.excl = excl_df
+        self.slab = slab_df
+        self.log: list  = []
+        self.stat: dict = {}
+
+    def L(self, msg, lv="info"):
+        self.log.append({"lv": lv, "msg": msg})
+
+    # ── Step 1: Load ──────────────────────────────────────────────────────────
+    def step1(self, f):
+        self.L("Step 1 — Loading VLDS Q4 2025 …")
+        df = load_file(f, ["4s", "vlds", "main", "data", "q4", "sheet1", "sheet"])
+        if df is None or df.empty:
+            raise ValueError("VLDS Q4 2025 file is empty or could not be read.")
+        self.stat["total"] = len(df)
+
+        # Log all columns + key matches for diagnosis
+        self.L("  ALL columns: " + " | ".join(df.columns.tolist()))
+        keys = ["lob", "sub_lob", "segment", "inv_type", "batch_src", "item",
+                "line_item", "revenue", "inv_no", "cust_name", "cust_no",
+                "month", "zone", "bd", "consider_vd"]
+        found   = [f"{k}='{fc(df.columns, k)}'" for k in keys if fc(df.columns, k)]
+        missing = [k for k in keys if not fc(df.columns, k)]
+        self.L("  Matched: " + (", ".join(found) if found else "NONE"))
+        if missing:
+            self.L("  Not matched: " + ", ".join(missing), "warning")
+        self.L(f"  {len(df):,} rows loaded", "success")
+        return df
+
+    # ── Step 2: LOB / Sub-LOB / Segment / AUTO (Criteria A + B) ──────────────
+    def step2(self, df):
+        self.L("Step 2 — LOB eligibility …")
+        b   = len(df)
+        lob = fc(df.columns, "lob");    sub = fc(df.columns, "sub_lob")
+        seg = fc(df.columns, "segment"); ivt = fc(df.columns, "inv_type")
+        if not lob:
+            self.L("  WARNING: LOB column not found — skipping", "warning")
+            return df
+        ELIG = {"CBD", "NEW ENGINE", "REBUILD", "SOLUTIONS", "PARTS"}
+        df = df[N(df[lob]).isin(ELIG)].copy()
+        self.L(f"  After LOB filter: {len(df):,}")
+        if sub:
+            pts = N(df[lob]) == "PARTS"
+            sok = N(df[sub]).isin({"CORE", "FILTERS", "RECON", ""})
+            df  = df[~(pts & ~sok)].copy()
+        if seg:
+            df = df[N(df[seg]) != "EDO"].copy()
+        if seg and ivt:
+            auto = N(df[seg]) == "AUTO"
+            css  = N(df[ivt]).str.contains("CSS CORE COMP", regex=False, na=False)
+            df   = df[~(auto & ~css)].copy()
+        self.L(f"  Removed {b - len(df):,}, remain {len(df):,}", "success")
+        return df
+
+    # ── Step 3: DDS-Acoustics + Battery (Criteria C + D) ─────────────────────
+    def step3(self, df):
+        self.L("Step 3 — DDS-Acoustics & Battery …")
+        b   = len(df)
+        bc  = fc(df.columns, "batch_src"); ic = fc(df.columns, "item")
+        if bc:
+            df = df[~N(df[bc]).str.contains("DDS", regex=False, na=False)].copy()
+        if ic:
+            df = df[~(N(df[ic]) == "AX00000000")].copy()
+        self.L(f"  Removed {b - len(df):,}", "success")
+        return df
+
+    # ── Step 4: Credit Memo-Misc (Criteria E) ────────────────────────────────
+    def step4(self, df):
+        self.L("Step 4 — Credit Memo-Misc …")
+        b   = len(df)
+        bc  = fc(df.columns, "batch_src"); lc = fc(df.columns, "line_item")
+        if bc and lc:
+            cm = (N(df[bc]).str.contains("CREDIT MEMO", regex=False, na=False) &
+                  N(df[bc]).str.contains("MISC", regex=False, na=False))
+            ln = N(df[lc]); ex = pd.Series(False, index=df.index)
+            for kw in ["EARLY PAYMENT DISCOUNT", "INCENTIVE TO ENGINEER"]:
+                ex = ex | (cm & ln.str.contains(kw, regex=False, na=False))
+            df = df[~ex].copy()
+        self.L(f"  Removed {b - len(df):,}", "success")
+        return df
+
+    # ── Step 5: Exclusion list (49 criteria) ─────────────────────────────────
+    def step5(self, df):
+        self.L("Step 5 — Exclusion list …")
+        b   = len(df)
+        ivt = fc(df.columns, "inv_type")
+        lc  = fc(df.columns, "line_item")
+        ic  = fc(df.columns, "item")
+        ex  = self.excl.copy()
+        at  = next((c for c in ex.columns if any(k in c.lower() for k in
+                    ["apply", "column", "filter"])), ex.columns[-1])
+        atn = N(ex[at])
+
+        # Transaction Type / Invoice Type exclusions
+        tr  = ex[atn.str.contains("TRANSACTION TYPE|INVOICE TYPE", regex=True, na=False)]
+        tk  = set(N(tr["Particulars"]).tolist())
+        if ivt and tk:
+            mk = N(df[ivt]).isin(tk)
+            df = df[~mk].copy()
+            self.L(f"  Invoice Type exclusions: {mk.sum():,}")
+
+        # Line Item Description exclusions
+        lr  = ex[atn.str.contains("LINE ITEM", regex=True, na=False)]
+        lk  = [k for k in N(lr["Particulars"]).tolist() if k]
+        rl  = 0
+        if lc and lk:
+            ln = N(df[lc]); ml = pd.Series(False, index=df.index)
+            for kw in lk:
+                ml = ml | ln.str.contains(kw, regex=False, na=False)
+            rl += ml.sum(); df = df[~ml].copy()
+
+        # Item Number cross-check
+        in2 = next((c for c in ex.columns if "item" in c.lower() and
+                    any(k in c.lower() for k in ["no", "number", "applicable"])), None)
+        if ic and in2:
+            vik = set(N(lr[~N(lr[in2]).isin({"NA", "N/A", ""})]
+                        [in2]).tolist())
+            if vik:
+                mi = N(df[ic]).isin(vik); rl += mi.sum(); df = df[~mi].copy()
+
+        self.L(f"  Line Item excl: {rl:,}")
+        self.L(f"  Total removed: {b - len(df):,}, remain {len(df):,}", "success")
+        return df
+
+    # ── Step 6: DF/RECD exclusion ────────────────────────────────────────────
+    def step6(self, df, rf):
+        self.L("Step 6 — DF/RECD exclusion …")
+        b  = len(df)
+        bd = fc(df.columns, "bd");    iv = fc(df.columns, "inv_no")
+        it = fc(df.columns, "item");  rv = fc(df.columns, "revenue")
+        vd = fc(df.columns, "consider_vd")
+        keys = set()
+        if rf:
+            try:
+                dr = load_file(rf)
+                if dr is not None and not dr.empty:
+                    dc = fc(dr.columns, "inv_no") or dr.columns[0]
+                    di = fc(dr.columns, "item")   or dr.columns[1]
+                    dv = fc(dr.columns, "revenue") or dr.columns[-1]
+                    keys = set((dr[dc].fillna("").astype(str).str.strip() +
+                                dr[di].fillna("").astype(str).str.strip() +
+                                dr[dv].fillna("").astype(str).str.strip()).tolist())
+                    self.L(f"  {len(keys):,} DF/RECD keys loaded")
+            except Exception as e:
+                self.L(f"  WARNING: DF/RECD error: {e}", "warning")
+        if bd:
+            bn = N(df[bd])
+            if keys and iv and it and rv:
+                df["_ck"] = (df[iv].fillna("").astype(str).str.strip() +
+                             df[it].fillna("").astype(str).str.strip() +
+                             df[rv].fillna("").astype(str).str.strip())
+                mk = bn.str.contains("NO DF KIT", regex=False, na=False) & df["_ck"].isin(keys)
+                df.drop(columns=["_ck"], inplace=True)
+            else:
+                mk = bn.str.contains("NO DF KIT", regex=False, na=False)
+            df = df[~mk].copy()
+            self.L(f"  BD No-DF-Kit removed: {mk.sum():,}")
+        if vd:
+            vn  = N(df[vd])
+            rm  = (vn.str.contains("NO DF",   regex=False, na=False) |
+                   vn.str.contains("NO RECD", regex=False, na=False) |
+                   vn.str.contains("DF/RECD", regex=False, na=False))
+            df  = df[~rm].copy()
+            self.L(f"  Remark DF/RECD removed: {rm.sum():,}")
+        self.L(f"  Total removed: {b - len(df):,}, remain {len(df):,}", "success")
+        return df
+
+    # ── Step 7: Finalise eligible records ────────────────────────────────────
+    # After all exclusions, remaining rows ARE eligible.
+    # Only remove rows explicitly flagged NO — never require YES.
+    def step7(self, df):
+        self.L("Step 7 — Eligible records …")
+        vd = fc(df.columns, "consider_vd")
+        if vd:
+            vn     = N(df[vd])
+            NO_SET = {"NO", "N", "NOT ELIGIBLE", "INELIGIBLE", "0"}
+            ex_no  = vn.isin(NO_SET)
+            if 0 < ex_no.sum() < len(df):
+                df = df[~ex_no].copy()
+                self.L(f"  Explicit NO removed: {ex_no.sum():,}")
+            elif ex_no.sum() == len(df):
+                self.L("  WARNING: All rows flagged NO — skipping filter", "warning")
+        rv = fc(df.columns, "revenue")
+        self.stat["elig"]     = len(df)
+        self.stat["excl"]     = self.stat.get("total", 0) - len(df)
+        self.stat["sales_cr"] = to_num_safe(df[rv]).sum() / 1e7 if rv else 0.0
+        self.L(f"  Eligible: {len(df):,} | ₹{self.stat['sales_cr']:,.2f} Cr", "success")
+        return df
+
+    # ── Step 8: Quarterly Pivot ───────────────────────────────────────────────
+    # Rows    = Customer Account Name + Customer Account Number (+ Zone in index)
+    # Columns = Fiscal Month  (2025/10, 2025/11, 2025/12)
+    # Values  = Sum of Revenue Amount  (commas stripped before summing)
+    # Extra   = Grand Total column (row-wise)
+    # Grand Total ROW (col-wise) added in Excel writer
+    def step8(self, elig):
+        self.L("Step 8 — Quarterly pivot …")
+        cn = fc(elig.columns, "cust_name"); co = fc(elig.columns, "cust_no")
+        rv = fc(elig.columns, "revenue");   mo = fc(elig.columns, "month")
+        zn = fc(elig.columns, "zone")
+        self.L(f"  name='{cn}' no='{co}' rev='{rv}' month='{mo}' zone='{zn}'")
+
+        if not rv:
+            self.L("  WARNING: Revenue column not found", "warning")
+            return pd.DataFrame({"Error": ["Revenue column not found"]})
+        if not cn and not co:
+            self.L("  WARNING: Customer column not found", "warning")
+            return pd.DataFrame({"Error": ["Customer column not found"]})
+
+        elig = elig.copy()
+        # Strip commas from revenue BEFORE summing (fixes Indian number format zeros)
+        elig[rv] = to_num_safe(elig[rv])
+
+        # Build pivot index — include zone so it carries through to summary
+        idx = list(dict.fromkeys([c for c in [cn, co, zn] if c]))
+
+        if mo:
+            months = sorted(elig[mo].dropna().unique())
+            self.L(f"  Month values: {list(months[:8])}")
+            try:
+                elig["_mo"] = elig[mo].fillna("Unknown").astype(str).str.strip()
+                pv = elig.pivot_table(values=rv, index=idx, columns="_mo",
+                                      aggfunc="sum", fill_value=0).reset_index()
+                pv.columns.name = None
+                elig.drop(columns=["_mo"], errors="ignore", inplace=True)
+                mc = [c for c in pv.columns if c not in idx]
+                for c in mc:
+                    pv[c] = pd.to_numeric(pv[c], errors="coerce").fillna(0.0)
+                pv["Grand Total"] = pv[mc].sum(axis=1)
+                self.L(f"  Pivot: {len(pv)} customers × {len(mc)} months", "success")
+                return pv
+            except Exception as e:
+                self.L(f"  WARNING: Pivot error ({e}) — customer totals fallback", "warning")
+
+        grp = elig.groupby(idx)[rv].sum().reset_index()
+        grp.rename(columns={rv: "Q4 Total"}, inplace=True)
+        self.L(f"  Customer totals: {len(grp)} rows", "success")
+        return grp
+
+    # ── Step 9: Final Summary ─────────────────────────────────────────────────
+    # Formulas:
+    #   Increase      = Final Amount Q4-25  -  Final Amount Q4-24
+    #   Growth %      = Increase / Final Amount Q4-24  ×  100
+    #   Discount %    = slab lookup on Growth %
+    #   Discount Value= Final Amount Q4-25  ×  Discount % / 100
+    def step9(self, pivot, prev_f,
+              prev_join_col=None, prev_amt_col=None):
+        """
+        prev_join_col: column in prev year file to match customers on (user-selected)
+        prev_amt_col:  column in prev year file containing Q4-24 sales amount (user-selected)
+        """
+        self.L("Step 9 — Final Summary …")
+
+        # ── Identify columns from pivot ──────────────────────────
+        cn = next((c for c in pivot.columns if any(k in c.lower() for k in
+                   ["account name", "customer name", "customername"])), None)
+        co = next((c for c in pivot.columns if any(k in c.lower() for k in
+                   ["account number", "customer number", "customer_number",
+                    "cust no", "dealer number"])), None)
+        zn_piv = next((c for c in pivot.columns
+                       if c.lower() in ["zone", "region", "territory"]), None)
+        curr = ("Grand Total" if "Grand Total" in pivot.columns else
+                "Q4 Total"    if "Q4 Total"    in pivot.columns else pivot.columns[-1])
+
+        sm = pivot.copy()
+        sm["Final Amount Q4-25"] = sm[curr].apply(clean_num_str)
+
+        if zn_piv and zn_piv != "Zone":
+            sm["Zone"] = sm[zn_piv].fillna("").astype(str)
+        elif "Zone" in sm.columns:
+            sm["Zone"] = sm["Zone"].fillna("").astype(str)
+        else:
+            sm["Zone"] = ""
+
+        sm["Q4-24"] = 0.0
+
+        # ── Merge previous year data ─────────────────────────────
+        if prev_f:
+            try:
+                pf = load_file(prev_f)
+                if pf is None or pf.empty:
+                    self.L("  WARNING: Previous year file empty", "warning")
+                else:
+                    self.L("  Prev year cols: " + " | ".join(pf.columns.tolist()))
+                    self.L(f"  Rows: {len(pf)}")
+
+                    # ── Zone column in prev file ──────────────────
+                    pz = next((c for c in pf.columns if c.lower() in
+                               ["zone", "region", "territory"]), None)
+
+                    # ── Use user-selected columns if provided ────
+                    if prev_join_col and prev_join_col in pf.columns:
+                        jc = prev_join_col
+                        self.L(f"  Using USER-SELECTED join col: '{jc}'")
+                    else:
+                        # Auto-detect join column
+                        jc = next((c for c in pf.columns if any(k in c.lower() for k in
+                                   ["customer number","account number","customer_number",
+                                    "customer no","customer account number",
+                                    "cust no","dealer number"])), None) or                              next((c for c in pf.columns if any(k in c.lower() for k in
+                                   ["customer name","account name",
+                                    "customer account name","customername"])), None) or                              pf.columns[0]
+                        self.L(f"  Auto-detected join col: '{jc}'")
+
+                    if prev_amt_col and prev_amt_col in pf.columns:
+                        pa = prev_amt_col
+                        self.L(f"  Using USER-SELECTED amount col: '{pa}'")
+                    else:
+                        # Auto-detect Q4-24 amount column
+                        pa = None
+                        for nm in ["q4-24","q4 24","q4_24","q424",
+                                   "final amount q4-24","final amount q4 24",
+                                   "final q4-24","q4-2024","q4 2024"]:
+                            col_lc = {c.lower().strip(): c for c in pf.columns}
+                            if nm in col_lc:
+                                pa = col_lc[nm]; break
+                        if not pa:
+                            for c in pf.columns:
+                                if "q4" in c.lower():
+                                    nc = pd.to_numeric(
+                                        pf[c].astype(str).str.replace(",","",regex=False),
+                                        errors="coerce").notna().sum()
+                                    if nc > len(pf) * 0.3:
+                                        pa = c; break
+                        if not pa:
+                            best_c, best_s = None, 0
+                            for c in pf.columns[3:]:
+                                sc = pd.to_numeric(
+                                    pf[c].astype(str).str.replace(",","",regex=False),
+                                    errors="coerce").notna().mean()
+                                if sc > best_s:
+                                    best_s, best_c = sc, c
+                            if best_c and best_s > 0.3:
+                                pa = best_c
+                        self.L(f"  Auto-detected amount col: '{pa}'")
+
+                    if not pa:
+                        self.L("  ERROR: Q4-24 amount column not found. "
+                               "Please select it manually.", "error")
+                    else:
+                        # Sample values for debugging
+                        samp_jc = pf[jc].dropna().astype(str).str.strip().unique()[:4].tolist()
+                        samp_pa = pf[pa].dropna().unique()[:4].tolist()
+                        self.L(f"  Join col '{jc}' sample: {samp_jc}")
+                        self.L(f"  Amount col '{pa}' sample: {samp_pa}")
+
+                        pf_w = pf.copy()
+                        pf_w["_q424"] = pf_w[pa].apply(
+                            lambda x: clean_num_str(str(x).replace(",",""))
+                        )
+
+                        # Build lookup: one row per unique join-key value
+                        pg = pf_w.groupby(jc)["_q424"].sum().reset_index()
+                        pg.columns = ["_jk", "Q4-24"]
+                        if pz:
+                            zg = pf_w[[jc, pz]].drop_duplicates(subset=[jc])
+                            zg.columns = ["_jk", "_zone_prev"]
+                            pg = pg.merge(zg, on="_jk", how="left")
+
+                        extra = ["_zone_prev"] if "_zone_prev" in pg.columns else []
+
+                        # ── Merge: try each pivot identifier col ──
+                        merged = False
+                        for pivot_col in [co, cn]:
+                            if not pivot_col or pivot_col not in sm.columns:
+                                continue
+
+                            # Normalise: strip spaces, upper
+                            sm_keys = sm[pivot_col].fillna("").astype(str).str.strip().str.upper()
+                            pg_keys = pg["_jk"].fillna("").astype(str).str.strip().str.upper()
+
+                            samp_pivot = sm_keys.unique()[:4].tolist()
+                            samp_pg    = pg_keys.unique()[:4].tolist()
+                            self.L(f"  Pivot '{pivot_col}' sample: {samp_pivot}")
+                            self.L(f"  Prev  '{jc}' normalised:   {samp_pg}")
+
+                            pg_n = pg.copy(); pg_n["_nk"] = pg_keys
+                            sm_n = sm.copy(); sm_n["_nk"] = sm_keys
+                            t = sm_n.merge(pg_n[["_nk","Q4-24"]+extra],
+                                           on="_nk", how="left", suffixes=("","_r"))
+                            matched = int(t["Q4-24"].notna().sum())
+                            self.L(f"  Exact match on '{pivot_col}': {matched}/{len(sm)}")
+
+                            # Numeric-only fallback
+                            if matched == 0:
+                                sm_num = sm[pivot_col].astype(str).apply(lambda x: "".join(c for c in x if c.isdigit()))
+                                pg_num = pg["_jk"].astype(str).apply(lambda x: "".join(c for c in x if c.isdigit()))
+                                pg_n2  = pg.copy(); pg_n2["_nk"] = pg_num
+                                sm_n2  = sm.copy(); sm_n2["_nk"] = sm_num
+                                t2  = sm_n2.merge(pg_n2[["_nk","Q4-24"]+extra],
+                                                  on="_nk", how="left", suffixes=("","_r"))
+                                m2  = int(t2["Q4-24"].notna().sum())
+                                if m2 > matched:
+                                    self.L(f"  Numeric fallback on '{pivot_col}': {m2} matched")
+                                    t, matched = t2, m2
+
+                            if matched > 0:
+                                sm = t.copy()
+                                sm["Q4-24"] = sm["Q4-24"].apply(
+                                    lambda x: clean_num_str(str(x)) if pd.notna(x) else 0.0
+                                )
+                                if "_zone_prev" in sm.columns:
+                                    blank = sm["Zone"].fillna("").str.strip() == ""
+                                    sm.loc[blank,"Zone"] = sm.loc[blank,"_zone_prev"].fillna("")
+                                    sm.drop(columns=["_zone_prev"], inplace=True)
+                                sm.drop(columns=[c for c in ["_nk","_jk","Q4-24_r"]
+                                                 if c in sm.columns], inplace=True)
+                                self.L(f"  ✔ Q4-24 merged on '{pivot_col}': {matched} rows",
+                                       "success")
+                                merged = True
+                                break
+
+                        if not merged:
+                            self.L(
+                                "  ✘ Q4-24 merge failed — 0 rows matched.\n"
+                                "  ACTION REQUIRED: After uploading the Previous Year file,\n"
+                                "  use the dropdowns above the Run button to manually select:\n"
+                                "  1) The Customer Identifier column\n"
+                                "  2) The Q4-24 Sales Amount column",
+                                "warning"
+                            )
+
+            except Exception as e:
+                import traceback as _tb
+                self.L(f"  ERROR in prev year merge: {e}", "error")
+                self.L("  " + _tb.format_exc(), "error")
+
+        # ── Calculations ─────────────────────────────────────────
+        sm["Final Amount Q4-24"] = sm["Q4-24"].apply(
+            lambda x: clean_num_str(str(x)) if pd.notna(x) else 0.0
+        )
+        sm["Increase"]   = sm["Final Amount Q4-25"] - sm["Final Amount Q4-24"]
+        prev_safe        = sm["Final Amount Q4-24"].replace(0, np.nan)
+        sm["Growth %"]   = ((sm["Increase"] / prev_safe * 100)
+                            .replace([np.inf, -np.inf], 0).fillna(0))
+        sm["Discount %"] = sm["Growth %"].apply(self._slab)
+        sm["Discount Value"] = (
+            sm["Final Amount Q4-25"] * sm["Discount %"] / 100
+        ).fillna(0)
+
+        for c in sm.select_dtypes(include=[np.number]).columns:
+            sm[c] = sm[c].replace([np.inf, -np.inf], 0).fillna(0)
+
+        if zn_piv and zn_piv in sm.columns and zn_piv != "Zone":
+            sm.rename(columns={zn_piv: "Zone"}, inplace=True)
+        idc  = [c for c in [cn, "Zone", co] if c and c in sm.columns]
+        calc = ["Final Amount Q4-25","Q4-24","Final Amount Q4-24",
+                "Increase","Growth %","Discount %","Discount Value"]
+        out_cols = idc + [c for c in calc if c in sm.columns]
+        sm = sm[out_cols].copy()
+        rn = {}
+        if cn and cn in sm.columns: rn[cn] = "Customer Name"
+        if co and co in sm.columns: rn[co] = "Customer Number"
+        sm.rename(columns=rn, inplace=True)
+        self.L(f"  Summary: {len(sm)} rows, cols: {list(sm.columns)}", "success")
+        return sm
+
+    def _slab(self, g: float) -> float:
+        g = SF(g)
+        for _, r in self.slab.iterrows():
+            try:
+                lo = float(r.get("Min Growth (%)", 0) or 0)
+                hi = float(r.get("Max Growth (%)", 9999) or 9999)
+                if lo <= g < hi:
+                    return float(r.get("Incentive Payout (%)", 0) or 0)
+            except Exception:
+                continue
+        return 0.0
+
+    # ── Step 10: Excel Output (3 sheets) ─────────────────────────────────────
+    # Sheet 1: Quarterly Pivot
+    # Sheet 2: Final Summary
+    # Sheet 3: Eligible Data — full eligible records for client review/filtering
+    def step10(self, pivot, summary, eligible_df):
+        self.L("Step 10 — Writing Excel …")
+        out   = BytesIO()
+        NAVY  = "#1E3A5F"
+        BLUE  = "#2D6A9F"
+        ALT   = "#EEF4FF"
+        WHITE = "#FFFFFF"
+        GREEN = "#065F46"
+        ts    = datetime.now().strftime("%d %b %Y  %H:%M")
+        PCT   = {"Growth %", "Discount %"}
+        MONEY = {"Grand Total", "Q4-24", "Q4 Total", "Final Amount Q4-25",
+                 "Final Amount Q4-24", "Increase", "Discount Value"}
+
+        # Columns that must ALWAYS be treated as text (never as numbers)
+        TEXT_FORCE = {"Customer Number", "Customer Account Number",
+                      "Customer No", "Cust No", "Account Number",
+                      "Dealer Number", "Customer Account No",
+                      "Customer Name", "Zone", "Customer Name"}
+
+        def is_money(col):
+            # Never treat identifier/name/number columns as money
+            if col in TEXT_FORCE: return False
+            if any(k in col.lower() for k in
+                   ["customer number","account number","cust no",
+                    "dealer number","customer no","account no"]): return False
+            if col in MONEY: return True
+            if any(k in col.upper() for k in
+                   ["TOTAL", "AMOUNT", "SALES", "REVENUE", "VALUE", "INCREASE"]):
+                return True
+            if re.match(r"^\d{4}/\d{1,2}$", str(col)): return True
+            return False
+
+        with xlsxwriter.Workbook(out, {"nan_inf_to_errors": True}) as wb:
+
+            def FMT(**kw): return wb.add_format(kw)
+
+            fh  = FMT(bold=True, bg_color=NAVY, font_color=WHITE, border=1,
+                      align="center", valign="vcenter", text_wrap=True)
+            fh2 = FMT(bold=True, bg_color=BLUE, font_color=WHITE, border=1,
+                      align="center", valign="vcenter", text_wrap=True)
+            fc3 = FMT(border=1, align="left")
+            fca = FMT(border=1, align="left", bg_color=ALT)
+            fn  = FMT(border=1, num_format="#,##0.00")
+            fna = FMT(border=1, num_format="#,##0.00", bg_color=ALT)
+            fp  = FMT(border=1, num_format='0.00"%"')
+            fpa = FMT(border=1, num_format='0.00"%"', bg_color=ALT)
+            ft  = FMT(bold=True, bg_color=NAVY, font_color=WHITE,
+                      border=1, num_format="#,##0.00")
+            ftl = FMT(bold=True, bg_color=NAVY, font_color=WHITE, border=1)
+            ftp = FMT(bold=True, bg_color=NAVY, font_color=WHITE,
+                      border=1, num_format='0.00"%"')
+            ftt = FMT(bold=True, font_size=13, font_color=NAVY,
+                      align="center", valign="vcenter")
+            fts = FMT(italic=True, font_size=9, font_color="#888888", align="center")
+            fraw= FMT(border=1, align="left", font_size=9)
+            fra2= FMT(border=1, align="left", font_size=9, bg_color=ALT)
+            frh = FMT(bold=True, bg_color=GREEN, font_color=WHITE, border=1,
+                      align="center", valign="vcenter", font_size=9, text_wrap=True)
+
+            def write_sheet(ws, df, title, header_fmt=fh):
+                if df is None or df.empty:
+                    ws.write(0, 0, title + " — No data", ftt); return
+
+                # ── Pre-convert: force numeric columns to float ──────────────
+                # Fixes "number stored as text" Excel warning.
+                # TEXT_FORCE columns are always kept as strings.
+                df = df.copy()
+                num_cols = set()
+                for cn2 in df.columns:
+                    # Never convert identifier/name columns to numbers
+                    if cn2 in TEXT_FORCE:
+                        df[cn2] = df[cn2].fillna("").astype(str)
+                        continue
+                    if any(k in cn2.lower() for k in
+                           ["customer number","account number","cust no",
+                            "dealer number","customer no","account no",
+                            "customer name","zone"]):
+                        df[cn2] = df[cn2].fillna("").astype(str)
+                        continue
+                    if cn2 in PCT:
+                        df[cn2] = pd.to_numeric(
+                            df[cn2].astype(str).str.replace(",","",regex=False),
+                            errors="coerce").fillna(0.0)
+                        num_cols.add(cn2)
+                    elif is_money(cn2):
+                        df[cn2] = pd.to_numeric(
+                            df[cn2].astype(str).str.replace(",","",regex=False),
+                            errors="coerce").fillna(0.0)
+                        num_cols.add(cn2)
+                    else:
+                        # Auto-detect: ≥50% numeric → treat as number
+                        non_empty = df[cn2].astype(str).str.strip()
+                        non_empty = non_empty[non_empty.str.len() > 0]
+                        if len(non_empty) > 0:
+                            ratio = pd.to_numeric(
+                                non_empty.str.replace(",","",regex=False),
+                                errors="coerce").notna().mean()
+                            if ratio >= 0.5:
+                                df[cn2] = pd.to_numeric(
+                                    df[cn2].astype(str).str.replace(",","",regex=False),
+                                    errors="coerce").fillna(0.0)
+                                num_cols.add(cn2)
+
+                nc = len(df.columns)
+                ws.merge_range(0, 0, 0, nc-1, title, ftt); ws.set_row(0, 22)
+                ws.merge_range(1, 0, 1, nc-1, f"Forest Dealerships  |  {ts}", fts)
+                ws.set_row(1, 14)
+                for ci, cn2 in enumerate(df.columns):
+                    ws.write(2, ci, str(cn2), header_fmt)
+                    ws.set_column(ci, ci, max(16, len(str(cn2)) + 4))
+                ws.set_row(2, 28)
+                ws.freeze_panes(3, 1)
+
+                for ri, (_, row) in enumerate(df.iterrows()):
+                    alt = ri % 2 == 1
+                    for ci, cn2 in enumerate(df.columns):
+                        v = row[cn2]
+                        # Sanitise NaN/Inf
+                        if isinstance(v, float) and (pd.isna(v) or np.isinf(v)):
+                            v = 0.0
+                        if cn2 in PCT:
+                            ws.write(3+ri, ci, float(v) if v != "" else 0.0,
+                                     fpa if alt else fp)
+                        elif cn2 in num_cols:
+                            ws.write(3+ri, ci, float(v) if v != "" else 0.0,
+                                     fna if alt else fn)
+                        else:
+                            ws.write(3+ri, ci,
+                                     str(v) if v is not None else "",
+                                     fca if alt else fc3)
+
+                # Grand Total ROW
+                last = 3 + len(df)
+                ws.write(last, 0, "GRAND TOTAL", ftl)
+                for ci, cn2 in enumerate(df.columns[1:], 1):
+                    cd = pd.to_numeric(df[cn2], errors="coerce").fillna(0)
+                    if cn2 in PCT:
+                        ws.write(last, ci, float(cd.mean()), ftp)
+                    elif cn2 in num_cols:
+                        ws.write(last, ci, float(cd.sum()), ft)
+                    else:
+                        ws.write(last, ci, "", ftl)
+
+            # ── Sheet 1: Quarterly Pivot ──────────────────────────
+            write_sheet(wb.add_worksheet("Quarterly Pivot"),
+                        pivot, "VLDS Q4 2025 — Quarterly Sales Pivot (Customer-wise)")
+
+            # ── Sheet 2: Final Summary ────────────────────────────
+            write_sheet(wb.add_worksheet("Final Summary"),
+                        summary, "VLDS Q4 2025 — Final Incentive Summary")
+
+            # ── Sheet 3: Eligible Data (for client review) ────────
+            ws3 = wb.add_worksheet("Eligible Data (Review)")
+            if eligible_df is not None and not eligible_df.empty:
+                nc = len(eligible_df.columns)
+                ws3.merge_range(0, 0, 0, nc-1,
+                    "VLDS Q4 2025 — Eligible Transactions  |  For Client Review & Verification", ftt)
+                ws3.set_row(0, 22)
+                ws3.merge_range(1, 0, 1, nc-1,
+                    f"Use column filters to verify eligibility  |  {ts}", fts)
+                ws3.set_row(1, 13)
+                for ci, cn2 in enumerate(eligible_df.columns):
+                    ws3.write(2, ci, str(cn2), frh)
+                    ws3.set_column(ci, ci, max(14, len(str(cn2)) + 3))
+                ws3.set_row(2, 26)
+                ws3.freeze_panes(3, 0)
+                ws3.autofilter(2, 0, 2 + len(eligible_df), nc - 1)
+                for ri, (_, row) in enumerate(eligible_df.iterrows()):
+                    alt = ri % 2 == 1
+                    for ci, cn2 in enumerate(eligible_df.columns):
+                        v = row[cn2]
+                        if isinstance(v, float) and (pd.isna(v) or np.isinf(v)):
+                            v = ""
+                        ws3.write(3 + ri, ci,
+                                  str(v) if v is not None else "",
+                                  fra2 if alt else fraw)
+            else:
+                ws3.write(0, 0, "Eligible Data — No records", ftt)
+
+        out.seek(0)
+        self.L("  Excel ready — 3 sheets written", "success")
+        return out.getvalue()
+
+    # ── Run all steps ─────────────────────────────────────────────────────────
+    def run(self, vf, drf, pyf, dlf=None, cb=None,
+            prev_join_col=None, prev_amt_col=None):
+        """
+        prev_join_col: column name in prev year file used as join key
+        prev_amt_col:  column name in prev year file = Q4-24 sales amount
+        When provided, these override any auto-detection.
+        """
+        def p(pct, msg):
+            if cb: cb(pct, msg)
+
+        p(5,  "Loading VLDS Q4 2025 …");            df    = self.step1(vf)
+        p(14, "LOB eligibility …");                  df    = self.step2(df)
+        p(24, "DDS-Acoustics & Battery …");          df    = self.step3(df)
+        p(33, "Credit Memo-Misc …");                 df    = self.step4(df)
+        p(44, "Applying 49 exclusion criteria …");   df    = self.step5(df)
+        p(55, "DF/RECD exclusion …");                df    = self.step6(df, drf)
+        p(65, "Eligible records …");                 elig  = self.step7(df)
+        p(75, "Quarterly pivot …");                  pivot = self.step8(elig.copy())
+        p(86, "Final summary …");                    summary = self.step9(
+                                                         pivot.copy(), pyf,
+                                                         prev_join_col=prev_join_col,
+                                                         prev_amt_col=prev_amt_col)
+        p(95, "Writing Excel (3 sheets) …");         output = self.step10(pivot, summary, elig)
+        p(100, "Done ✓")
+        return output, self.log, self.stat
+
+
+# ─── STREAMLIT UI ────────────────────────────────────────────────────────────
+
+# app.py | VLDS Quarterly Incentive Processor — Forest Dealerships
+# Run:  streamlit run app.py
+
+
+
+
+
+st.set_page_config(
+    page_title="VLDS Incentive Processor",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─── CSS ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"] { background: #F0F2F5; }
+section.main { padding: 1.5rem 2.5rem 3rem; }
+
+/* ── Top bar ── */
+.topbar {
+    background: #0d2847;
+    border-radius: 10px;
+    padding: 1rem 1.8rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.6rem;
+}
+.topbar-title { color: #fff; font-size: 1.35rem; font-weight: 800;
+                letter-spacing: -0.3px; }
+.topbar-sub   { color: rgba(255,255,255,0.6); font-size: .8rem; }
+.topbar-badge {
+    background: rgba(255,255,255,0.12);
+    color: #fff; border-radius: 20px;
+    padding: 4px 14px; font-size: .75rem; font-weight: 700;
+    border: 1px solid rgba(255,255,255,0.25);
+}
+
+/* ── File row ── */
+.file-table {
+    background: #fff;
+    border-radius: 10px;
+    border: 1px solid #E2E8F0;
+    overflow: hidden;
+    margin-bottom: 1.2rem;
+}
+.file-row {
+    display: flex;
+    align-items: center;
+    padding: 0 1rem;
+    border-bottom: 1px solid #F1F5F9;
+    min-height: 58px;
+    gap: 1rem;
+}
+.file-row:last-child { border-bottom: none; }
+.file-row-header {
+    background: #F8FAFC;
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .8px;
+    text-transform: uppercase;
+    color: #94A3B8;
+    padding: 0.45rem 1rem;
+    display: flex;
+    gap: 1rem;
+    border-bottom: 1px solid #E2E8F0;
+}
+.file-label {
+    min-width: 280px;
+    font-size: .82rem;
+    font-weight: 600;
+    color: #1E3A5F;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+}
+.tag-req { font-size: .58rem; font-weight: 700; color: #DC2626;
+           background: #FEE2E2; border-radius: 4px; padding: 1px 5px; }
+.tag-opt { font-size: .58rem; font-weight: 700; color: #059669;
+           background: #D1FAE5; border-radius: 4px; padding: 1px 5px; }
+.tag-ok  { font-size: .58rem; font-weight: 700; color: #1D4ED8;
+           background: #DBEAFE; border-radius: 4px; padding: 1px 5px; }
+.drop-hint { font-size: .7rem; color: #94A3B8; }
+.file-limit { font-size: .65rem; color: #CBD5E1; }
+
+/* ── Run button ── */
+div[data-testid="stButton"] > button[kind="primary"] {
+    background: #0d2847 !important;
+    color: #fff !important; border: none !important;
+    border-radius: 8px !important; font-weight: 700 !important;
+    font-size: .95rem !important; padding: .7rem 2.5rem !important;
+    letter-spacing: .2px;
+}
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+    background: #1a5c9e !important;
+}
+
+/* ── Download button ── */
+div[data-testid="stDownloadButton"] > button {
+    background: #059669 !important; color: #fff !important;
+    border: none !important; border-radius: 8px !important;
+    font-weight: 700 !important; font-size: .95rem !important;
+    padding: .7rem 2rem !important; width: 100% !important;
+}
+
+/* ── Result strip ── */
+.result-strip {
+    background: #fff;
+    border: 1px solid #E2E8F0;
+    border-left: 4px solid #059669;
+    border-radius: 8px;
+    padding: .8rem 1.2rem;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    margin-bottom: 1rem;
+}
+.rs-item { text-align: center; }
+.rs-val  { font-size: 1.3rem; font-weight: 800; }
+.rs-lbl  { font-size: .68rem; color: #6B7280; }
+
+/* ── Log ── */
+.log-box {
+    background: #0f172a;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: .78rem;
+}
+.log-ok   { color: #4ade80; }
+.log-warn { color: #fbbf24; }
+.log-err  { color: #f87171; }
+.log-info { color: #94a3b8; }
+
+#MainMenu, footer, header { visibility: hidden; }
+div[data-testid="stDecoration"] { display: none; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─── Session state ────────────────────────────────────────────────────────────
+for k, v in {
+    "files": {}, "result": None, "logs": [], "stats": {},
+    "prev_join_col": None,    # column in prev year file used as join key
+    "prev_amt_col":  None,    # column in prev year file = Q4-24 amount
+    "prev_cols":     [],      # all columns in prev year file (for dropdowns)
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+S = st.session_state
+
+# ─── Top bar ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="topbar">
+  <div>
+    <div class="topbar-title">🚗 &nbsp;VLDS Quarterly Incentive Processor</div>
+    <div class="topbar-sub">Forest Dealerships &nbsp;·&nbsp;
+      4S Dealer Eligibility &amp; Incentive Summary</div>
+  </div>
+  <span class="topbar-badge">Q4 · 2025</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ─── File definitions ─────────────────────────────────────────────────────────
+FILE_DEFS = [
+    ("vlds_main",   "📊", "VLDS Q4 2025 — Main File",               True),
+    ("df_recd",     "🔗", "DF & RECD Q4 Oct-Dec File",              True),
+    ("prev_year",   "📅", "VLDS Q4 2024 — Previous Year Summary",   True),
+    ("dealer_list", "🏪", "4S Dealer List",                         False),
+    ("excl_file",   "📋", "Exclusion List File",                    False),
+    ("slab_file",   "📈", "Slab Table File",                        False),
+    ("base_data",   "🗂️", "Base Data File",                          False),
+]
+
+# ─── File upload table ────────────────────────────────────────────────────────
+st.markdown('<div class="file-table">', unsafe_allow_html=True)
+st.markdown("""
+<div class="file-row-header">
+  <span style="min-width:280px;">File</span>
+  <span style="flex:1;">Upload &nbsp;·&nbsp; Drag &amp; Drop or Browse &nbsp;·&nbsp;
+    Max 200 MB &nbsp;·&nbsp; .xlsx · .xls · .csv</span>
+</div>
+""", unsafe_allow_html=True)
+
+for key, icon, label, req in FILE_DEFS:
+    loaded = key in S.files
+    req_tag = '<span class="tag-req">Required</span>' if req else '<span class="tag-opt">Optional</span>'
+    ok_tag  = '<span class="tag-ok">✓ Loaded</span>' if loaded else ""
+
+    c1, c2 = st.columns([3, 6], gap="small")
+    with c1:
+        st.markdown(
+            f'<div class="file-label">'
+            f'<span>{icon}</span><span>{label}</span>'
+            f'&nbsp;{req_tag} {ok_tag}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        up = st.file_uploader(
+            key,
+            type=["xlsx", "xls", "csv"],
+            key=f"fu_{key}",
+            label_visibility="collapsed",
+        )
+        if up:
+            if up.size > 209_715_200:   # 200 MB
+                st.error(f"'{up.name}' exceeds 200 MB limit.")
+            else:
+                S.files[key] = up
+                st.toast(f"✅  {up.name}")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ─── Previous Year Column Mapping (shown as soon as prev_year file is loaded) ─
+if "prev_year" in S.files:
+    try:
+        _pf = S.files["prev_year"]
+        _pf.seek(0)
+        import openpyxl as _opx  # noqa
+        # Re-read just header to get column names quickly
+        _pf.seek(0)
+        _fname = _pf.name.lower()
+        if _fname.endswith(".csv"):
+            _preview = pd.read_csv(_pf, nrows=2, dtype=str)
+        else:
+            # scan first 8 rows to find header
+            _pf.seek(0)
+            _raw = pd.read_excel(_pf, header=None, nrows=8, dtype=str)
+            best_r, best_s = 0, 0
+            for _i, _row in _raw.iterrows():
+                _s = sum(1 for _v in _row if pd.notna(_v) and len(str(_v).strip()) > 1)
+                if _s > best_s:
+                    best_s, best_r = _s, _i
+            _pf.seek(0)
+            _preview = pd.read_excel(_pf, header=int(best_r), nrows=2, dtype=str)
+        _pf.seek(0)
+
+        _cols = [c for c in _preview.columns
+                 if not (isinstance(c, float) and pd.isna(c))]
+        _cols = [str(c).strip() for c in _cols if str(c).strip()]
+
+        if _cols != S.prev_cols:
+            S.prev_cols     = _cols
+            S.prev_join_col = None
+            S.prev_amt_col  = None
+
+        st.markdown("#### 🔗 Previous Year File — Column Mapping")
+        st.caption(
+            "Select which columns in the **VLDS Q4 2024 file** contain the "
+            "**Customer Identifier** (to match customers) and the **Q4-24 Sales Amount**. "
+            "This is required to calculate Increase, Growth % and Discount Value."
+        )
+        _mc1, _mc2 = st.columns(2, gap="medium")
+        with _mc1:
+            _join_idx = (
+                _cols.index(S.prev_join_col)
+                if S.prev_join_col and S.prev_join_col in _cols else 0
+            )
+            S.prev_join_col = st.selectbox(
+                "Customer Identifier column (join key)",
+                options=_cols,
+                index=_join_idx,
+                key="sel_join",
+                help="The column whose values match Customer Name or Number in your VLDS file"
+            )
+        with _mc2:
+            _amt_idx = (
+                _cols.index(S.prev_amt_col)
+                if S.prev_amt_col and S.prev_amt_col in _cols else 0
+            )
+            S.prev_amt_col = st.selectbox(
+                "Q4-24 Sales Amount column",
+                options=_cols,
+                index=_amt_idx,
+                key="sel_amt",
+                help="The column that contains the previous year Q4 sales figures"
+            )
+
+        # Show a small preview so user can verify selection
+        with st.expander("Preview first 5 rows of previous year file", expanded=False):
+            st.dataframe(_preview.head(5), use_container_width=True)
+
+    except Exception as _e:
+        st.warning(f"Could not read previous year file columns: {_e}")
+
+# ─── Test Q4-24 Merge button ─────────────────────────────────────────────────
+if "prev_year" in S.files and S.prev_join_col and S.prev_amt_col:
+    if st.button("🔍  Test Q4-24 Merge (check before running)", use_container_width=False):
+        try:
+            _pf2 = S.files["prev_year"]
+            _pf2.seek(0)
+            _fname2 = _pf2.name.lower()
+            if _fname2.endswith(".csv"):
+                _pfd = pd.read_csv(_pf2, dtype=str)
+            else:
+                _pf2.seek(0)
+                _raw2 = pd.read_excel(_pf2, header=None, nrows=10, dtype=str)
+                _best_r2, _best_s2 = 0, 0
+                for _i2, _row2 in _raw2.iterrows():
+                    _sc2 = sum(1 for _v2 in _row2 if pd.notna(_v2) and len(str(_v2).strip()) > 1)
+                    if _sc2 > _best_s2:
+                        _best_s2, _best_r2 = _sc2, _i2
+                _pf2.seek(0)
+                _pfd = pd.read_excel(_pf2, header=int(_best_r2), dtype=str)
+
+            # Clean columns
+            _new_c = []
+            for _ci2, _c2 in enumerate(_pfd.columns):
+                _nm2 = f"Unnamed_{_ci2}" if (isinstance(_c2, float) and pd.isna(_c2)) else str(_c2).strip()
+                _new_c.append(_nm2)
+            _pfd.columns = _new_c
+
+            if S.prev_join_col in _pfd.columns and S.prev_amt_col in _pfd.columns:
+                _jk_vals = _pfd[S.prev_join_col].dropna().astype(str).str.strip()
+                _jk_vals = _jk_vals[_jk_vals != ""].unique()[:10].tolist()
+                _amt_vals = _pfd[S.prev_amt_col].dropna().unique()[:5].tolist()
+
+                st.success(f"✅ Columns found in previous year file")
+                c_a, c_b = st.columns(2)
+                with c_a:
+                    st.markdown(f"**Join column:** `{S.prev_join_col}`")
+                    st.markdown("Sample values (first 10):")
+                    for v in _jk_vals:
+                        st.code(v)
+                with c_b:
+                    st.markdown(f"**Amount column:** `{S.prev_amt_col}`")
+                    st.markdown("Sample values:")
+                    for v in _amt_vals:
+                        st.code(str(v))
+                st.info(
+                    "👆 Compare these values with your VLDS file's Customer Name/Number column. "
+                    "They must match EXACTLY (same spelling, same format) for the merge to work. "
+                    "Share these values with your developer if they don't match."
+                )
+            else:
+                st.error(f"Column not found. Available: {list(_pfd.columns)}")
+        except Exception as _e2:
+            st.error(f"Error: {_e2}")
+
+# ─── Action row ───────────────────────────────────────────────────────────────
+req_keys  = ["vlds_main", "df_recd", "prev_year"]
+all_ready = all(k in S.files for k in req_keys)
+
+col_run, col_dl, col_status = st.columns([2, 2, 3], gap="medium")
+
+with col_run:
+    run_clicked = st.button(
+        "🚀  Run VLDS Processing",
+        type="primary",
+        disabled=not all_ready,
+        use_container_width=True,
+    )
+
+with col_dl:
+    if S.result:
+        st.download_button(
+            "📥  Download Report (Excel)",
+            data=S.result,
+            file_name="VLDS_Q4_2025_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    else:
+        st.button("📥  Download Report (Excel)",
+                  disabled=True, use_container_width=True)
+
+with col_status:
+    if not all_ready:
+        missing = [label for k, _, label, req in FILE_DEFS
+                   if req and k not in S.files]
+        st.warning("  ·  ".join(f"⚠ {m}" for m in missing), icon=None)
+    elif S.result:
+        stats = S.stats
+        st.markdown(
+            f'<div class="result-strip">'
+            f'<div class="rs-item"><div class="rs-val" style="color:#4F46E5">'
+            f'{stats.get("total",0):,}</div>'
+            f'<div class="rs-lbl">Total Rows</div></div>'
+            f'<div class="rs-item"><div class="rs-val" style="color:#059669">'
+            f'{stats.get("elig",0):,}</div>'
+            f'<div class="rs-lbl">Eligible</div></div>'
+            f'<div class="rs-item"><div class="rs-val" style="color:#DC2626">'
+            f'{stats.get("excl",0):,}</div>'
+            f'<div class="rs-lbl">Excluded</div></div>'
+            f'<div class="rs-item"><div class="rs-val" style="color:#D97706">'
+            f'₹{stats.get("sales_cr",0):,.1f} Cr</div>'
+            f'<div class="rs-lbl">Eligible Sales</div></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Upload required files and click Run.")
+
+# ─── Processing ───────────────────────────────────────────────────────────────
+if run_clicked:
+    S.result = None
+    S.logs   = []
+    S.stats  = {}
+
+    prog = st.progress(0, text="Starting …")
+    lbl  = st.empty()
+
+    def cb(pct, msg):
+        prog.progress(pct, text=msg)
+        lbl.markdown(f"⚙️ **{msg}**")
+
+    try:
+        excl = (parse_excl(S.files["excl_file"])
+                if "excl_file" in S.files else pd.DataFrame(FALLBACK_EXCL))
+        slab = (parse_slab(S.files["slab_file"])
+                if "slab_file" in S.files else pd.DataFrame(FALLBACK_SLABS))
+
+        proc = Processor(excl, slab)
+        out, logs, stats = proc.run(
+            S.files.get("vlds_main"),
+            S.files.get("df_recd"),
+            S.files.get("prev_year"),
+            S.files.get("dealer_list"),
+            cb=cb,
+            prev_join_col=S.prev_join_col,
+            prev_amt_col=S.prev_amt_col,
+        )
+        S.result = out
+        S.logs   = logs
+        S.stats  = stats
+        prog.progress(100, text="Done ✓")
+        lbl.success("✅  Processing complete — click Download Report")
+        st.balloons()
+        st.rerun()
+
+    except Exception as e:
+        prog.empty()
+        lbl.error(f"❌  {e}")
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+
+# ─── Processing log ───────────────────────────────────────────────────────────
+if S.logs:
+    with st.expander(
+        "📋  Processing Log  — open if output looks wrong",
+        expanded=(S.result is None)
+    ):
+        lines_html = ""
+        for e in S.logs:
+            msg = str(e["msg"]).replace("<", "&lt;").replace(">", "&gt;")
+            lv  = e["lv"]
+            css = "log-ok" if lv == "success" else \
+                  "log-warn" if lv == "warning" else \
+                  "log-err" if lv == "error" else "log-info"
+            lines_html += f'<div class="{css}">{msg}</div>\n'
+        st.markdown(f'<div class="log-box">{lines_html}</div>',
+                    unsafe_allow_html=True)
