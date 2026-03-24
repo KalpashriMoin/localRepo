@@ -306,3 +306,273 @@ if S.logs:
             cls  = {"success":"lo","warning":"lw","error":"le"}.get(e["lv"],"li")
             html += f'<div class="{cls}">{msg}</div>\n'
         st.markdown(f'<div class="logbox">{html}</div>', unsafe_allow_html=True)
+
+
+
+
+# diagnostic.py | VLDS Step-by-Step Diagnostic Tool
+# Run:  streamlit run diagnostic.py
+# PURPOSE: Upload your files one at a time and see EXACTLY what the
+#          code reads — column names, sample values, row counts.
+#          This will tell us WHY eligible data is 0.
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+
+st.set_page_config(page_title="VLDS Diagnostic", page_icon="🔍", layout="wide")
+st.title("🔍 VLDS Diagnostic — Step by Step")
+st.caption("Upload your files below. Each step shows exactly what the code sees.")
+
+# ─── Helper: smart header detection ──────────────────────────────────────────
+def read_smart(fobj):
+    if fobj is None:
+        return None
+    fobj.seek(0)
+    fname = fobj.name.lower()
+    if fname.endswith(".csv"):
+        return pd.read_csv(fobj, dtype=str)
+    # Try each row 0-9 as header, pick the one with most non-empty/non-numeric cells
+    fobj.seek(0)
+    best_df, best_score, best_row = None, -1, 0
+    for hdr_row in range(10):
+        try:
+            fobj.seek(0)
+            df = pd.read_excel(fobj, header=hdr_row, dtype=str, nrows=5)
+            # Score = number of columns that look like real column names
+            score = sum(1 for c in df.columns
+                        if not str(c).startswith("Unnamed") and
+                        not str(c).replace(".","").isdigit() and
+                        len(str(c).strip()) > 1)
+            if score > best_score:
+                best_score = score
+                best_row   = hdr_row
+                best_df    = df
+        except Exception:
+            break
+    if best_df is None:
+        fobj.seek(0)
+        return pd.read_excel(fobj, dtype=str)
+    # Now read full file with the best header row
+    fobj.seek(0)
+    df = pd.read_excel(fobj, header=best_row, dtype=str)
+    # Clean column names
+    cols, seen = [], {}
+    for i, c in enumerate(df.columns):
+        nm = f"Col_{i}" if (isinstance(c,float) and pd.isna(c)) else str(c).strip()
+        if nm in seen:
+            seen[nm] += 1; nm = f"{nm}_{seen[nm]}"
+        else:
+            seen[nm] = 0
+        cols.append(nm)
+    df.columns = cols
+    df = df.dropna(axis=1, how="all")
+    return df
+
+
+def show_col_list(df, title="Columns in this file"):
+    st.markdown(f"**{title}** — {len(df.columns)} columns, {len(df):,} rows")
+    cols_df = pd.DataFrame({"#": range(1, len(df.columns)+1),
+                            "Column Name": df.columns.tolist()})
+    st.dataframe(cols_df, use_container_width=True, height=200)
+
+def find_col_manual(df, label, hints):
+    """Let user confirm or override which column maps to a logical field."""
+    lc = {str(c).strip().lower(): c for c in df.columns}
+    auto = None
+    for h in hints:
+        if h.lower() in lc:
+            auto = lc[h.lower()]
+            break
+    if not auto:
+        for h in hints:
+            for k, v in lc.items():
+                if h.lower() in k or k in h.lower():
+                    auto = v
+                    break
+            if auto:
+                break
+    options = ["(not found)"] + list(df.columns)
+    idx = options.index(auto) if auto in options else 0
+    chosen = st.selectbox(label, options, index=idx, key=f"sel_{label}")
+    return chosen if chosen != "(not found)" else None
+
+# ─── STEP 1: VLDS Main File ───────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📂 STEP 1 — Upload VLDS Q4 2025 Main File")
+vf = st.file_uploader("VLDS Q4 2025 Main File", type=["xlsx","xls","csv"],
+                       key="vf", label_visibility="collapsed")
+
+if vf:
+    df_vlds = read_smart(vf)
+    show_col_list(df_vlds, "Columns in VLDS file")
+    st.dataframe(df_vlds.head(5), use_container_width=True)
+
+    st.markdown("#### Map columns to logical fields")
+    st.caption("Auto-detected below — change if wrong")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        lob_col = find_col_manual(df_vlds, "LOB column",
+            ["lob","line of business"])
+        rem_col = find_col_manual(df_vlds, "Remark column",
+            ["remark","remarks","consider for vd","eligible sales/ not eligible",
+             "consider for vlds"])
+    with c2:
+        inv_col  = find_col_manual(df_vlds, "Invoice Type column",
+            ["invoice type","invoicetype","order header subtype code","transaction type"])
+        batch_col= find_col_manual(df_vlds, "Batch Source column",
+            ["batch source","batchsource"])
+    with c3:
+        line_col = find_col_manual(df_vlds, "Line Item column",
+            ["line item","line item description","inventory item description","item description"])
+        item_col = find_col_manual(df_vlds, "Item Number column",
+            ["item number","item_number","item","item no"])
+    with c4:
+        rev_col  = find_col_manual(df_vlds, "Revenue Amount column",
+            ["revenue amount","revenue_amount","rev amount"])
+        inv_no_col = find_col_manual(df_vlds, "Invoice Number column",
+            ["invoice number","invoice no","invoice_number"])
+        bd_col   = find_col_manual(df_vlds, "BD column", ["bd"])
+        cn_col   = find_col_manual(df_vlds, "Customer Name column",
+            ["customer account name","customer name"])
+        co_col   = find_col_manual(df_vlds, "Customer Number column",
+            ["customer account number","customer number","dealer number"])
+        mo_col   = find_col_manual(df_vlds, "Fiscal Month column",
+            ["reporting to fiscal month","reporting fiscal month name",
+             "fiscal month","cmi month","month"])
+
+    # Show unique values in key columns
+    if lob_col:
+        st.markdown(f"**LOB column `{lob_col}` — unique values:**")
+        uv = df_vlds[lob_col].dropna().astype(str).str.strip().value_counts()
+        st.dataframe(uv.reset_index().rename(columns={"index":"LOB Value",lob_col:"Count"}),
+                     use_container_width=True, height=180)
+
+    if rem_col:
+        st.markdown(f"**Remark column `{rem_col}` — unique values:**")
+        uv2 = df_vlds[rem_col].fillna("(blank)").astype(str).str.strip().value_counts()
+        st.dataframe(uv2.reset_index().rename(columns={"index":"Remark Value",rem_col:"Count"}),
+                     use_container_width=True, height=180)
+    else:
+        st.warning("⚠️ Remark column NOT found. This means eligible = 0 because "
+                   "the code needs this column to identify blank (eligible) rows.")
+
+    # ── STEP 1a: Dealer filter test ───────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📂 STEP 2 — Upload 4S Dealer List & Test Filter")
+    dlf = st.file_uploader("4S Dealer List", type=["xlsx","xls","csv"],
+                            key="dlf", label_visibility="collapsed")
+    if dlf:
+        df_dl = read_smart(dlf)
+        show_col_list(df_dl, "Columns in Dealer List")
+        st.dataframe(df_dl.head(5), use_container_width=True)
+
+        dn_col = find_col_manual(df_dl, "Dealer Customer Number column",
+            ["customer number","dealer number","customer account number","cust no","account number"])
+
+        if dn_col and co_col:
+            dealer_nos = set(df_dl[dn_col].fillna("").astype(str).str.strip().str.upper().tolist()) - {"","NAN"}
+            vlds_nos   = set(df_vlds[co_col].fillna("").astype(str).str.strip().str.upper().tolist()) - {"","NAN"}
+            overlap    = dealer_nos & vlds_nos
+
+            st.success(f"✅ Dealer list has **{len(dealer_nos)}** unique numbers")
+            st.success(f"✅ VLDS file has **{len(vlds_nos)}** unique numbers")
+            if overlap:
+                st.success(f"✅ **{len(overlap)} numbers match** — dealer filter will work")
+                st.markdown(f"Sample matching: `{list(overlap)[:5]}`")
+            else:
+                st.error("❌ **ZERO numbers match** between dealer list and VLDS file!")
+                st.markdown(f"Dealer list sample: `{list(dealer_nos)[:5]}`")
+                st.markdown(f"VLDS file sample:   `{list(vlds_nos)[:5]}`")
+                st.error("This is why eligible data = 0. The customer numbers don't match. "
+                         "Check if they have leading zeros, spaces, or different formats.")
+
+            # Apply filter
+            if overlap:
+                df_after_dealer = df_vlds[
+                    df_vlds[co_col].fillna("").astype(str).str.strip().str.upper().isin(dealer_nos)
+                ].copy()
+                rev_total = pd.to_numeric(
+                    df_after_dealer[rev_col].astype(str).str.replace(",","",regex=False),
+                    errors="coerce").sum() / 1e7 if rev_col else 0
+                st.success(f"✅ After dealer filter: **{len(df_after_dealer):,} rows** | "
+                           f"₹{rev_total:,.2f} Cr")
+
+    # ── STEP 1b: LOB test ─────────────────────────────────────────────────────
+    if lob_col:
+        st.markdown("---")
+        st.subheader("📂 STEP 3 — LOB Filter Test")
+        lob_vals = df_vlds[lob_col].fillna("").astype(str).str.strip().str.upper()
+        parts_ct = (lob_vals == "PARTS").sum()
+        st.info(f"PARTS rows: **{parts_ct:,}** out of {len(df_vlds):,} total")
+        if parts_ct == 0:
+            st.error("❌ No PARTS rows found! Check the exact value in the LOB column above.")
+            st.markdown("Sample LOB values: " +
+                        str(df_vlds[lob_col].dropna().astype(str).str.strip().unique()[:10].tolist()))
+
+    # ── STEP 1c: Remark blank check ───────────────────────────────────────────
+    if rem_col:
+        st.markdown("---")
+        st.subheader("📂 STEP 4 — Remark Column: Eligible Rows")
+        blank_rem = df_vlds[rem_col].fillna("").astype(str).str.strip() == ""
+        st.info(f"Rows with BLANK remark (eligible): **{blank_rem.sum():,}** out of {len(df_vlds):,}")
+        if blank_rem.sum() == 0:
+            st.error("❌ No blank remark rows found in the ORIGINAL file. "
+                     "This means the client file already has remarks filled in for everything.")
+            st.markdown("Most common remarks in the file:")
+            st.dataframe(df_vlds[rem_col].value_counts().head(10).reset_index(),
+                         use_container_width=True)
+
+# ─── STEP 5: Previous Year File ──────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📂 STEP 5 — Previous Year File (Q4-24)")
+pyf = st.file_uploader("Previous Year Summary", type=["xlsx","xls","csv"],
+                        key="pyf", label_visibility="collapsed")
+if pyf:
+    df_py = read_smart(pyf)
+    show_col_list(df_py, "Columns in Previous Year file")
+    st.dataframe(df_py.head(5), use_container_width=True)
+
+    py_jc = find_col_manual(df_py, "Customer Identifier column (for joining)",
+        ["customer account number","customer number","customer name",
+         "account name","dealer number","cust no"])
+    py_ac = find_col_manual(df_py, "Q4-24 Sales Amount column",
+        ["q4-24","q4 24","final amount q4-24","q4-2024","previous quarter"])
+
+    if py_jc:
+        st.markdown(f"**Join column `{py_jc}` — sample values:**")
+        samp = df_py[py_jc].dropna().astype(str).str.strip().unique()[:10].tolist()
+        st.code(str(samp))
+    if py_ac:
+        st.markdown(f"**Amount column `{py_ac}` — sample values:**")
+        samp2 = df_py[py_ac].dropna().unique()[:8].tolist()
+        st.code(str(samp2))
+
+    if 'vf' in st.session_state and vf and py_jc and co_col:
+        py_keys  = set(df_py[py_jc].fillna("").astype(str).str.strip().str.upper().tolist())
+        vlds_ids = set(df_vlds[co_col].fillna("").astype(str).str.strip().str.upper().tolist())
+        overlap2 = py_keys & vlds_ids
+        if overlap2:
+            st.success(f"✅ {len(overlap2)} customers match between prev year and VLDS files")
+        else:
+            st.error("❌ NO customers match between prev year file and VLDS file — Q4-24 will be 0")
+            st.markdown(f"Prev year sample: `{list(py_keys)[:5]}`")
+            st.markdown(f"VLDS file sample:  `{list(vlds_ids)[:5]}`")
+
+# ─── Summary ─────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📋 What to do next")
+st.markdown("""
+After running this diagnostic, **share the output with your developer**:
+
+1. **Step 2 result** — Do the dealer numbers match? If not, show sample values from both sides.
+2. **Step 3 result** — Are there PARTS rows? If not, what are the actual LOB values?
+3. **Step 4 result** — Does the original VLDS file already have remarks filled in?
+4. **Step 5 result** — Do the customer IDs match between prev year and VLDS files?
+
+These 4 answers will tell us exactly what to fix in the main processor.
+""")
+
+                
