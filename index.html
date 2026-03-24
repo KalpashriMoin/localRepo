@@ -1,1 +1,308 @@
 
+# app.py | VLDS Quarterly Incentive Processor — Forest Dealerships
+# Run:  streamlit run app.py
+import streamlit as st
+import pandas as pd
+import traceback
+
+from config  import DEFAULT_EXCL, DEFAULT_SLABS
+from utils   import parse_excl, parse_slab, read_file, find_header_row
+from processor import VLDSProcessor
+
+st.set_page_config(
+    page_title="VLDS Incentive Processor",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─── CSS ──────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"]{background:#F0F2F6;}
+section.main{padding:1.1rem 2rem 3rem;}
+
+.hdr{background:linear-gradient(120deg,#0d2847 0%,#1758a0 60%,#1585cc 100%);
+     border-radius:10px;padding:1rem 1.8rem;display:flex;align-items:center;
+     justify-content:space-between;margin-bottom:1.4rem;}
+.hdr-t{color:#fff;font-size:1.35rem;font-weight:800;letter-spacing:-.3px;}
+.hdr-s{color:rgba(255,255,255,.62);font-size:.78rem;margin-top:3px;}
+.badge{background:rgba(255,255,255,.14);color:#fff;border-radius:20px;
+       padding:4px 14px;font-size:.73rem;font-weight:700;
+       border:1px solid rgba(255,255,255,.25);}
+
+/* File upload table */
+.ftbl{background:#fff;border-radius:10px;border:1px solid #E2E8F0;
+      overflow:hidden;margin-bottom:1rem;}
+.fthd{background:#F8FAFC;padding:.42rem 1rem;display:flex;align-items:center;
+      font-size:.66rem;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+      color:#94A3B8;border-bottom:1px solid #E2E8F0;gap:1rem;}
+.flbl{min-width:260px;font-size:.82rem;font-weight:600;color:#1E3A5F;
+      display:flex;align-items:center;gap:.4rem;}
+.req{font-size:.59rem;font-weight:700;color:#DC2626;background:#FEE2E2;
+     border-radius:4px;padding:1px 5px;}
+.opt{font-size:.59rem;font-weight:700;color:#059669;background:#D1FAE5;
+     border-radius:4px;padding:1px 5px;}
+.ok {font-size:.59rem;font-weight:700;color:#1D4ED8;background:#DBEAFE;
+     border-radius:4px;padding:1px 5px;}
+
+/* Mapping panel */
+.mbox{background:#fff;border:1px solid #E2E8F0;border-left:4px solid #1758a0;
+      border-radius:8px;padding:.85rem 1.2rem;margin-bottom:1rem;}
+.mbox-t{font-size:.8rem;font-weight:700;color:#1E3A5F;margin-bottom:.4rem;}
+
+/* Result strip */
+.rstrip{background:#fff;border:1px solid #E2E8F0;border-left:4px solid #059669;
+        border-radius:8px;padding:.7rem 1.2rem;display:flex;
+        align-items:center;gap:2rem;flex-wrap:wrap;}
+.rv{font-size:1.25rem;font-weight:800;line-height:1.2;}
+.rl{font-size:.67rem;color:#6B7280;}
+
+/* Buttons */
+div[data-testid="stButton"]>button[kind="primary"]{
+    background:#0d2847!important;color:#fff!important;border:none!important;
+    border-radius:8px!important;font-weight:700!important;font-size:.93rem!important;
+    padding:.68rem 2rem!important;width:100%!important;
+    box-shadow:0 3px 10px rgba(13,40,71,.28)!important;}
+div[data-testid="stButton"]>button[kind="primary"]:hover{background:#1758a0!important;}
+div[data-testid="stDownloadButton"]>button{
+    background:#059669!important;color:#fff!important;border:none!important;
+    border-radius:8px!important;font-weight:700!important;font-size:.93rem!important;
+    padding:.68rem 2rem!important;width:100%!important;
+    box-shadow:0 3px 10px rgba(5,150,105,.26)!important;}
+
+/* Log */
+.logbox{background:#0f172a;border-radius:8px;padding:.85rem 1rem;
+        max-height:280px;overflow-y:auto;font-family:monospace;font-size:.75rem;}
+.lo{color:#4ade80;} .lw{color:#fbbf24;} .le{color:#f87171;} .li{color:#94a3b8;}
+
+#MainMenu,footer,header{visibility:hidden;}
+div[data-testid="stDecoration"]{display:none;}
+</style>
+""", unsafe_allow_html=True)
+
+# ─── Session state ─────────────────────────────────────────────────────────────
+for k, v in {
+    "files":        {},
+    "result":       None,
+    "logs":         [],
+    "stats":        {},
+    "prev_join_col":None,
+    "prev_amt_col": None,
+    "prev_cols":    [],
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+S = st.session_state
+
+# ─── Header ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hdr">
+  <div>
+    <div class="hdr-t">🚗 &nbsp;VLDS Quarterly Incentive Processor</div>
+    <div class="hdr-s">Forest Dealerships &nbsp;·&nbsp; 4S Dealer Eligibility &amp; Incentive Report</div>
+  </div>
+  <span class="badge">Q4 · 2025</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ─── File upload table ──────────────────────────────────────────────────────────
+FILE_DEFS = [
+    ("vlds_main",   "📊", "VLDS Q4 2025 — Main File",              True),
+    ("df_recd",     "🔗", "DF & RECD Q4 2025 File",               True),
+    ("prev_year",   "📅", "VLDS Q4 2024 — Previous Year Summary",  True),
+    ("dealer_list", "🏪", "4S Dealer List",                        True),
+    ("excl_file",   "📋", "Exclusion List File",                   False),
+    ("slab_file",   "📈", "Slab Table File",                       False),
+    ("base_data",   "🗂️", "Base Data File",                         False),
+]
+
+st.markdown('<div class="ftbl">', unsafe_allow_html=True)
+st.markdown("""
+<div class="fthd">
+  <span style="min-width:260px;">Input File</span>
+  <span>.xlsx · .xls · .csv &nbsp;·&nbsp; Max 200 MB</span>
+</div>
+""", unsafe_allow_html=True)
+
+for key, icon, label, req in FILE_DEFS:
+    loaded  = key in S.files
+    _cls  = "req" if req else "opt"
+    _lbl  = "Required" if req else "Optional"
+    rtag  = f'<span class="{_cls}">{_lbl}</span>'
+    ok_tag  = '<span class="ok">✓ Loaded</span>' if loaded else ""
+    c1, c2  = st.columns([3, 6], gap="small")
+    with c1:
+        st.markdown(
+            f'<div style="display:flex;align-items:center;min-height:50px;padding:0 1rem;">'
+            f'<div class="flbl"><span>{icon}</span><span>{label}</span>'
+            f'&nbsp;{rtag}&nbsp;{ok_tag}</div></div>',
+            unsafe_allow_html=True)
+    with c2:
+        up = st.file_uploader(
+            key, type=["xlsx","xls","csv"],
+            key=f"fu_{key}", label_visibility="collapsed")
+        if up:
+            if up.size > 209_715_200:
+                st.error(f"'{up.name}' exceeds 200 MB.")
+            else:
+                S.files[key] = up
+                st.toast(f"✅  {up.name}")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ─── Previous Year Column Mapping ──────────────────────────────────────────────
+if "prev_year" in S.files:
+    st.markdown('<div class="mbox">', unsafe_allow_html=True)
+    st.markdown('<div class="mbox-t">🔗 Previous Year File — Select Columns for Q4-24 Merge</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        "Pick the **Customer Identifier** column (to match customers) and the "
+        "**Q4-24 Sales Amount** column. These are required to populate Q4-24 in the Final Summary."
+    )
+    try:
+        _pf = S.files["prev_year"]
+        _pf.seek(0)
+        _fn = _pf.name.lower()
+        if _fn.endswith(".csv"):
+            _tmp = pd.read_csv(_pf, nrows=3, dtype=str)
+        else:
+            _pf.seek(0)
+            _raw = pd.read_excel(_pf, header=None, nrows=10, dtype=str)
+            _br, _bs = 0, 0
+            for _i, _row in _raw.iterrows():
+                _s = sum(1 for v in _row if pd.notna(v) and len(str(v).strip()) > 1)
+                if _s > _bs: _bs, _br = _s, _i
+            _pf.seek(0)
+            _tmp = pd.read_excel(_pf, header=int(_br), nrows=3, dtype=str)
+        _pf.seek(0)
+        _cols = [str(c).strip() for c in _tmp.columns
+                 if not (isinstance(c, float) and pd.isna(c)) and str(c).strip()]
+
+        if _cols != S.prev_cols:
+            S.prev_cols = _cols
+            S.prev_join_col = None
+            S.prev_amt_col  = None
+
+        _m1, _m2, _m3 = st.columns([3, 3, 2], gap="small")
+        with _m1:
+            _ji = _cols.index(S.prev_join_col) if S.prev_join_col in _cols else 0
+            S.prev_join_col = st.selectbox(
+                "Customer Identifier column",
+                _cols, index=_ji, key="sel_jc",
+                help="Column whose values match Customer Name or Number in the VLDS file")
+        with _m2:
+            _ai = _cols.index(S.prev_amt_col) if S.prev_amt_col in _cols else 0
+            S.prev_amt_col = st.selectbox(
+                "Q4-24 Sales Amount column",
+                _cols, index=_ai, key="sel_ac",
+                help="Column containing previous year Q4 sales figures (e.g. Q4-24 or Final Amount Q4-24)")
+        with _m3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.expander("Preview"):
+                st.dataframe(_tmp.head(3), use_container_width=True)
+    except Exception as _e:
+        st.warning(f"Could not read previous year file: {_e}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ─── Options row ───────────────────────────────────────────────────────────────
+_oc1, _oc2 = st.columns([2, 6], gap="medium")
+with _oc1:
+    slab_type = st.radio("Slab type", ["Quarterly", "Annual"],
+                         horizontal=True, index=0,
+                         help="Quarterly or Annual payout % from slab table")
+
+# ─── Action row ────────────────────────────────────────────────────────────────
+req_keys  = ["vlds_main", "df_recd", "prev_year", "dealer_list"]
+all_ready = all(k in S.files for k in req_keys)
+
+ac1, ac2, ac3 = st.columns([2, 2, 4], gap="medium")
+
+with ac1:
+    run_btn = st.button("🚀  Run VLDS Processing", type="primary",
+                        disabled=not all_ready, use_container_width=True)
+with ac2:
+    if S.result:
+        qtr  = S.stats.get("quarter", "Q4")
+        yr   = S.stats.get("year", "2025")
+        st.download_button(
+            "📥  Download Report",
+            data=S.result,
+            file_name=f"VLDS_{qtr}_{yr}_Incentive_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+    else:
+        st.button("📥  Download Report", disabled=True, use_container_width=True)
+
+with ac3:
+    if not all_ready:
+        missing = [lbl for k, _, lbl, req in FILE_DEFS if req and k not in S.files]
+        st.warning("  ·  ".join(f"⚠ {m}" for m in missing))
+    elif S.result:
+        s = S.stats
+        st.markdown(
+            f'<div class="rstrip">'
+            f'<div><div class="rv" style="color:#4F46E5">{s.get("total",0):,}</div>'
+            f'<div class="rl">Total Rows</div></div>'
+            f'<div><div class="rv" style="color:#059669">{s.get("eligible",0):,}</div>'
+            f'<div class="rl">Eligible</div></div>'
+            f'<div><div class="rv" style="color:#DC2626">{s.get("excluded",0):,}</div>'
+            f'<div class="rl">Excluded</div></div>'
+            f'<div><div class="rv" style="color:#D97706">₹{s.get("sales_cr",0):,.1f} Cr</div>'
+            f'<div class="rl">Eligible Sales</div></div>'
+            f'</div>',
+            unsafe_allow_html=True)
+    else:
+        st.info("Upload all 4 required files, then click Run.")
+
+# ─── Processing ────────────────────────────────────────────────────────────────
+if run_btn:
+    S.result = None; S.logs = []; S.stats = {}
+    prog = st.progress(0, text="Starting …")
+    lbl  = st.empty()
+
+    def cb(pct, msg):
+        prog.progress(pct, text=msg)
+        lbl.markdown(f"⚙️ **{msg}**")
+
+    try:
+        excl = (parse_excl(S.files["excl_file"])
+                if "excl_file" in S.files else pd.DataFrame(DEFAULT_EXCL))
+        slab = (parse_slab(S.files["slab_file"])
+                if "slab_file" in S.files else pd.DataFrame(DEFAULT_SLABS))
+
+        proc = VLDSProcessor(excl, slab)
+        out, logs, stats = proc.run(
+            vlds_f        = S.files.get("vlds_main"),
+            dfrecd_f      = S.files.get("df_recd"),
+            prev_f        = S.files.get("prev_year"),
+            dealer_f      = S.files.get("dealer_list"),
+            prev_join_col = S.prev_join_col,
+            prev_amt_col  = S.prev_amt_col,
+            slab_type     = slab_type,
+            cb            = cb,
+        )
+        S.result = out; S.logs = logs; S.stats = stats
+        prog.progress(100, text="Done ✓")
+        lbl.success("✅  Processing complete — click Download Report")
+        st.balloons()
+        st.rerun()
+
+    except Exception as e:
+        prog.empty()
+        lbl.error(f"❌  {e}")
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+
+# ─── Processing log ─────────────────────────────────────────────────────────────
+if S.logs:
+    with st.expander(
+        "📋  Processing Log  — open this if Q4-24 shows 0 or output is wrong",
+        expanded=(S.result is None)
+    ):
+        html = ""
+        for e in S.logs:
+            msg  = str(e["msg"]).replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
+            cls  = {"success":"lo","warning":"lw","error":"le"}.get(e["lv"],"li")
+            html += f'<div class="{cls}">{msg}</div>\n'
+        st.markdown(f'<div class="logbox">{html}</div>', unsafe_allow_html=True)
