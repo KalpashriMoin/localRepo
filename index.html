@@ -1287,7 +1287,377 @@ class VLDSProcessor:
         )
 
         p(93, "Writing Excel report …")
-        output = self.step9_excel(pivot, summary, eligible, curr_lbl)
+   
+                    
+                    output = self.step9_excel(pivot, summary, eligible, curr_lbl)
 
         p(100, "Done ✓")
         return output, self.log, self.stats
+
+
+
+
+# utils.py | File I/O, column resolution, number helpers
+# ─────────────────────────────────────────────────────────────────────────────
+import pandas as pd
+import numpy as np
+import re
+from config import COL_SYNS, ALL_KNOWN, DEFAULT_EXCL, DEFAULT_SLABS
+
+
+# ── Column name cleaning ──────────────────────────────────────────────────────
+def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    cols, seen = [], {}
+    for i, c in enumerate(df.columns):
+        nm = f"Col_{i}" if (isinstance(c, float) and pd.isna(c)) else str(c).strip()
+        if nm in seen:
+            seen[nm] += 1
+            nm = f"{nm}_{seen[nm]}"
+        else:
+            seen[nm] = 0
+        cols.append(nm)
+    df.columns = cols
+    return df.dropna(axis=1, how="all")
+
+
+# ── Header-row auto-detection ─────────────────────────────────────────────────
+def _score_row(row) -> int:
+    """Score a row by how many cells match known column headings."""
+    return sum(1 for v in row
+               if pd.notna(v) and str(v).strip().lower() in ALL_KNOWN)
+
+
+def find_header_row(fobj, sheet=0) -> int:
+    """
+    Scan first 15 rows and return index of best-matching header row.
+    FIX: Increased from 10 → 15 rows to handle files with more title rows on top.
+    """
+    try:
+        fobj.seek(0)
+        raw = pd.read_excel(fobj, sheet_name=sheet,
+                            header=None, nrows=15, dtype=str)  # FIX: was nrows=10
+        best_r, best_s = 0, 0
+        for i, row in raw.iterrows():
+            s = _score_row(row)
+            if s > best_s:
+                best_s, best_r = s, i
+        return int(best_r)
+    except Exception:
+        return 0
+
+
+# ── File reading ──────────────────────────────────────────────────────────────
+def read_file(fobj, sheet_hints=None) -> pd.DataFrame:
+    """
+    Read uploaded Excel/CSV.
+    Auto-detects header row (handles title/blank rows at top of file).
+    FIX: sheet_hints fallback now also tries sheet index 0 explicitly if no hint matches.
+    Returns cleaned DataFrame or None.
+    """
+    if fobj is None:
+        return None
+    fobj.seek(0)
+    fname = fobj.name.lower()
+
+    if fname.endswith(".csv"):
+        try:
+            return clean_cols(pd.read_csv(fobj, dtype=str))
+        except Exception:
+            fobj.seek(0)
+            return clean_cols(pd.read_csv(fobj, dtype=str, encoding="latin-1"))
+
+    # ── Find best sheet ────────────────────────────────────────────────────────
+    sheet = 0  # default: first sheet
+    if sheet_hints:
+        try:
+            fobj.seek(0)
+            xl = pd.ExcelFile(fobj)
+            for sh in xl.sheet_names:
+                for h in sheet_hints:
+                    if h.lower() in sh.lower():
+                        sheet = sh
+                        break
+                if sheet != 0:
+                    break
+            # FIX: if no hint matched, log it and fall back to first sheet (index 0)
+            # This means even if your sheet is named "Sheet1" or "Data", it still loads.
+        except Exception:
+            pass
+
+    fobj.seek(0)
+    hdr = find_header_row(fobj, sheet=sheet)
+    fobj.seek(0)
+    try:
+        df = pd.read_excel(fobj, sheet_name=sheet, header=hdr, dtype=str)
+        return clean_cols(df)
+    except Exception:
+        # FIX: If named sheet fails, fall back to first sheet by index
+        fobj.seek(0)
+        hdr2 = find_header_row(fobj, sheet=0)
+        fobj.seek(0)
+        return clean_cols(pd.read_excel(fobj, sheet_name=0, header=hdr2, dtype=str))
+
+
+def get_all_sheets(fobj):
+    """Return list of sheet names from an Excel file."""
+    try:
+        fobj.seek(0)
+        xl = pd.ExcelFile(fobj)
+        return xl.sheet_names
+    except Exception:
+        return []
+
+
+# ── Column resolution ─────────────────────────────────────────────────────────
+def find_col(df_cols, key: str) -> str:
+    """
+    Find actual column name for a logical key using COL_SYNS.
+    Exact match first, then partial match.
+    """
+    syns = COL_SYNS.get(key, [key.lower()])
+    lc = {}
+    for c in df_cols:
+        s = "" if (isinstance(c, float) and pd.isna(c)) else str(c).strip()
+        lc[s.lower()] = c
+    for s in syns:
+        t = s.strip().lower()
+        if t in lc:
+            return lc[t]
+    for s in syns:
+        t = s.strip().lower()
+        for col_l, col_r in lc.items():
+            if t in col_l or col_l in t:
+                return col_r
+    return None
+
+
+def fcol(df_cols, *hints) -> str:
+    """
+    Find column matching any of the given hint strings (case-insensitive).
+    FIX: also normalises column names by collapsing multiple spaces before matching.
+    """
+    # FIX: normalise column names — strip + collapse spaces
+    lc = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df_cols}
+    for h in hints:
+        hl = re.sub(r"\s+", " ", h.strip().lower())
+        if hl in lc:
+            return lc[hl]
+        for k, v in lc.items():
+            if hl in k or k in hl:
+                return v
+    return None
+
+
+# ── Number helpers ────────────────────────────────────────────────────────────
+def N(s: pd.Series) -> pd.Series:
+    """Normalise: strip + uppercase."""
+    return s.fillna("").astype(str).str.strip().str.upper()
+
+
+def to_num(s: pd.Series) -> pd.Series:
+    """Convert to numeric, stripping commas first."""
+    return pd.to_numeric(
+        s.astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce"
+    ).fillna(0.0)
+
+
+def safe_num(v) -> float:
+    """Safe float conversion — handles commas, brackets (accounting negatives)."""
+    try:
+        sv = str(v).strip().replace(",", "").replace(" ", "")
+        if sv.startswith("(") and sv.endswith(")"):
+            sv = "-" + sv[1:-1]
+        f = float(sv)
+        return 0.0 if (pd.isna(f) or np.isinf(f)) else f
+    except Exception:
+        return 0.0
+
+
+# ── Quarter / Year detection ──────────────────────────────────────────────────
+def quarter_from_filename(fname: str) -> str:
+    """
+    Extract Q1/Q2/Q3/Q4 from filename.
+    FIX: defaults to Q4 if not found (safe for this project).
+    """
+    m = re.search(r"Q([1-4])", fname, re.IGNORECASE)
+    return f"Q{m.group(1)}" if m else "Q4"
+
+
+def year_from_filename(fname: str) -> str:
+    """
+    Extract year from filename e.g. '2025' or '25'.
+    FIX: also handles 2-digit years like 'Q4_25' → returns '2025'.
+    """
+    # Try full 4-digit year first
+    m4 = re.search(r"20(\d{2})", fname)
+    if m4:
+        return m4.group(0)  # e.g. "2025"
+    # Try 2-digit year after Q1/Q2/Q3/Q4 e.g. "Q4_25" or "Q425"
+    m2 = re.search(r"Q[1-4][_\-]?(\d{2})\b", fname, re.IGNORECASE)
+    if m2:
+        return "20" + m2.group(1)
+    # Default to current year
+    from datetime import datetime
+    return str(datetime.now().year)
+
+
+# ── Parse uploaded exclusion / slab files ─────────────────────────────────────
+def parse_excl(fobj) -> pd.DataFrame:
+    df = read_file(fobj)
+    if df is None or df.empty:
+        return pd.DataFrame(DEFAULT_EXCL)
+    pc = fcol(df.columns, "particulars", "description", "keyword", "criteria")
+    ic = fcol(df.columns, "item no", "item number", "item")
+    cc = fcol(df.columns, "column", "apply to", "filter applied", "where")
+    if not pc:
+        return pd.DataFrame(DEFAULT_EXCL)
+    out = pd.DataFrame()
+    out["Sr.No"]       = range(1, len(df) + 1)
+    out["Particulars"] = df[pc].fillna("").astype(str).str.strip()
+    out["Item No"]     = df[ic].fillna("NA").astype(str).str.strip() if ic else "NA"
+    out["Column"]      = df[cc].fillna("Line Item").astype(str).str.strip() if cc else "Line Item"
+    return out[out["Particulars"].str.len() > 0].reset_index(drop=True)
+
+
+def parse_slab(fobj) -> pd.DataFrame:
+    df = read_file(fobj)
+    if df is None or df.empty:
+        return pd.DataFrame(DEFAULT_SLABS)
+    mc = fcol(df.columns, "min", "growth min", "min growth", "from")
+    xc = fcol(df.columns, "max", "growth max", "max growth", "to")
+    qc = fcol(df.columns, "quarterly", "quarterly payout", "incentive payout", "payout")
+    ac = fcol(df.columns, "annual", "annual payout")
+    if not (mc and xc and qc):
+        return pd.DataFrame(DEFAULT_SLABS)
+    out = pd.DataFrame()
+    out["Growth Min(%)"]       = pd.to_numeric(df[mc], errors="coerce").fillna(0)
+    out["Growth Max(%)"]       = pd.to_numeric(df[xc], errors="coerce").fillna(9999)
+    out["Quarterly Payout(%)"] = pd.to_numeric(df[qc], errors="coerce").fillna(0)
+    out["Annual Payout(%)"]    = pd.to_numeric(df[ac], errors="coerce").fillna(0) if ac else 0.0
+    return out.dropna(subset=["Growth Min(%)", "Growth Max(%)"]).reset_index(drop=True)
+
+
+
+
+# config.py | VLDS Processor — Forest Dealerships
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Default exclusion list ───────────────────────────────────────────────────
+# "Column" tells which column in VLDS to search for the Particular.
+# If "Item No" is not NA → also cross-check the Item Number column.
+DEFAULT_EXCL = [
+    # Invoice Type column
+    {"Sr.No": 1,  "Particulars": "Credit Note",           "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 2,  "Particulars": "Debit Note",            "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 3,  "Particulars": "CSS DPT",               "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 4,  "Particulars": "EDO",                   "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 5,  "Particulars": "Stock Transfer",        "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 6,  "Particulars": "Internal Transfer",     "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 7,  "Particulars": "Purchase Return",       "Item No": "NA", "Column": "Invoice Type"},
+    {"Sr.No": 8,  "Particulars": "Sample Invoice",        "Item No": "NA", "Column": "Invoice Type"},
+    # Batch Source column
+    {"Sr.No": 9,  "Particulars": "DDS-Acoustics",         "Item No": "NA", "Column": "Batch Source"},
+    # Line Item / Item Number column
+    {"Sr.No": 10, "Particulars": "Auto Parts",            "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 11, "Particulars": "Battery",               "Item No": "AX00000000", "Column": "Line Item"},
+    {"Sr.No": 12, "Particulars": "Datum",                 "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 13, "Particulars": "Lubricants",            "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 14, "Particulars": "Accessories",           "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 15, "Particulars": "AMC",                   "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 16, "Particulars": "Extended Warranty",     "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 17, "Particulars": "Insurance",             "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 18, "Particulars": "Finance Charges",       "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 19, "Particulars": "Stamp Duty",            "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 20, "Particulars": "Freight Outward",       "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 21, "Particulars": "Transit Insurance",     "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 22, "Particulars": "Labour",                "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 23, "Particulars": "Early Payment Discount","Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 24, "Particulars": "Incentive to Engineer", "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 25, "Particulars": "RMA Credit Notes",      "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 26, "Particulars": "Price Support",         "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 27, "Particulars": "Rebate",                "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 28, "Particulars": "Commission",            "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 29, "Particulars": "Service Charge",        "Item No": "NA",         "Column": "Line Item"},
+    {"Sr.No": 30, "Particulars": "Miscellaneous",         "Item No": "NA",         "Column": "Line Item"},
+]
+
+# ── Default slab table ────────────────────────────────────────────────────────
+DEFAULT_SLABS = [
+    {"Growth Min(%)": 0,    "Growth Max(%)": 5,    "Quarterly Payout(%)": 1.0, "Annual Payout(%)": 0.5},
+    {"Growth Min(%)": 5,    "Growth Max(%)": 10,   "Quarterly Payout(%)": 1.5, "Annual Payout(%)": 1.0},
+    {"Growth Min(%)": 10,   "Growth Max(%)": 15,   "Quarterly Payout(%)": 2.0, "Annual Payout(%)": 1.5},
+    {"Growth Min(%)": 15,   "Growth Max(%)": 20,   "Quarterly Payout(%)": 2.5, "Annual Payout(%)": 2.0},
+    {"Growth Min(%)": 20,   "Growth Max(%)": 9999, "Quarterly Payout(%)": 3.0, "Annual Payout(%)": 2.5},
+]
+
+# ── Column synonyms — extend if your file uses different names ───────────────
+COL_SYNS = {
+    "lob":         ["lob", "line of business"],
+    "sub_lob":     ["sub lob", "sublob", "sub-lob"],
+    "segment":     ["segment"],
+    "inv_type":    ["invoice type", "invoicetype", "order header subtype code",
+                    "transaction type"],
+    "batch_src":   ["batch source", "batchsource", "batch_source"],
+    "item":        ["item", "item number", "item_number", "item code", "item no"],
+    "line_item":   ["line item", "line item description",
+                    "inventory item description", "item description"],
+    "revenue":     ["revenue amount", "revenue_amount", "rev amount"],
+    "inv_no":      ["invoice number", "invoice_number", "invoice no"],
+    "cust_name":   ["customer account name", "customer name",
+                    "customername", "account name"],
+    "cust_no":     ["customer account number", "customer number",
+                    "customer_number", "customer no", "account number",
+                    "dealer number", "customer acct number"],
+    "month":       ["reporting to fiscal month", "reporting fiscal month name",
+                    "reporting fiscal month", "fiscal month", "cmi month",
+                    "month", "period"],
+    "zone":        ["zone", "region", "territory"],
+    "bd":          ["bd", "b.d", "b.d."],
+    "remark":      ["remark", "remarks", "consider for vd", "consider for vlds",
+                    "eligible sales/ not eligible",
+                    "eligible sales/not eligible"],
+    "dealer_cust_no": ["customer number", "dealer number", "customer account number",
+                       "cust no", "account number"],
+}
+
+# ── ALL_KNOWN: used by header-row auto-detector in utils.py ──────────────────
+# Add every possible column heading your files might have.
+# The more entries here, the better the header row is detected.
+ALL_KNOWN = {
+    # LOB / classification
+    "lob", "line of business", "sub lob", "sublob", "segment",
+    # Invoice
+    "invoice type", "invoicetype", "order header subtype code", "transaction type",
+    "invoice number", "invoice no", "invoice_number",
+    # Batch
+    "batch source", "batchsource", "batch_source",
+    # Item / Line
+    "item", "item number", "item_number", "item code", "item no",
+    "line item", "line item description", "inventory item description", "item description",
+    # Revenue
+    "revenue amount", "revenue_amount", "rev amount",
+    # Customer
+    "customer account name", "customer name", "customername", "account name",
+    "customer account number", "customer number", "customer_number",
+    "customer no", "account number", "dealer number", "customer acct number",
+    # Month / period
+    "reporting to fiscal month", "reporting fiscal month name",
+    "reporting fiscal month", "fiscal month", "cmi month", "month", "period",
+    # Geography
+    "zone", "region", "territory",
+    # BD / DF
+    "bd", "b.d", "b.d.",
+    # Remark
+    "remark", "remarks", "consider for vd", "consider for vlds",
+    "eligible sales/ not eligible", "eligible sales/not eligible",
+    # Summary columns (prev year files)
+    "q4-24", "q4 24", "q4_24", "q4-2024", "q4-25", "q4 25",
+    "final amount q4-24", "final amount q4-25",
+    "previous quarter", "prev quarter", "grand total",
+    "increase", "growth %", "discount %", "discount value",
+    # Generic
+    "sr no", "sr.no", "s.no", "serial no", "particulars", "description",
+    "column", "apply to", "where",
+}
+                    
