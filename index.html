@@ -408,3 +408,734 @@ if S.logs:
             cls = {"success":"lo","warning":"lw","error":"le"}.get(e["lv"],"li")
             html += f'<div class="{cls}">{msg}</div>\n'
         st.markdown(f'<div class="logbox">{html}</div>', unsafe_allow_html=True)
+
+
+
+
+
+
+# processor.py | VLDS Processing Pipeline — Forest Dealerships
+import pandas as pd
+import numpy as np
+from io import BytesIO
+from datetime import datetime
+import traceback
+import re
+import xlsxwriter
+
+from utils import (read_file, find_col, fcol, N, to_num, safe_num,
+                   quarter_from_filename, year_from_filename)
+
+
+class VLDSProcessor:
+
+    def __init__(self, excl_df: pd.DataFrame, slab_df: pd.DataFrame):
+        self.excl  = excl_df
+        self.slab  = slab_df
+        self.log   = []
+        self.stats = {}
+
+    def L(self, msg, lv="info"):
+        self.log.append({"lv": lv, "msg": msg})
+
+    # ─── Step 1 ───────────────────────────────────────────────────────────────
+    def step1_load(self, vlds_f):
+        self.L("Step 1 ▸ Loading VLDS main file …")
+
+        # Quarter/year: UI selection takes priority (set before run() is called).
+        # Only fill from filename if UI did NOT already set them.
+        if not self.stats.get("quarter"):
+            self.stats["quarter"] = quarter_from_filename(vlds_f.name)
+        if not self.stats.get("year"):
+            self.stats["year"] = year_from_filename(vlds_f.name)
+        self.L(f"  quarter={self.stats['quarter']}  year={self.stats['year']}")
+
+        df = read_file(vlds_f, sheet_hints=["vlds","4s","main","data","q4",
+                                             "sheet","report","export","highway"])
+        if df is None or df.empty:
+            raise ValueError("VLDS main file is empty or could not be read.")
+        self.stats["total"] = len(df)
+        self.L(f"  {len(df):,} rows | {len(df.columns)} columns")
+        self.L("  Columns: " + " | ".join(df.columns.tolist()))
+
+        checks = {
+            "LOB":         ["lob","line of business"],
+            "Remark":      ["remark","remarks","consider for vd",
+                            "consider for vlds","eligible sales/ not eligible"],
+            "Batch Source":["batch source"],
+            "Invoice Type":["invoice type","order header subtype code"],
+            "Line Item":   ["line item","inventory item description",
+                            "line item description","item description"],
+            "Item Number": ["item number","item no","item"],
+            "Revenue Amt": ["revenue amount","revenue_amount"],
+            "Invoice No":  ["invoice number","invoice no"],
+            "Cust Number": ["customer account number","customer number",
+                            "dealer number","dealer no"],
+            "Cust Name":   ["customer account name","customer name"],
+            "Fiscal Month":["reporting to fiscal month","fiscal month","cmi month"],
+            "Zone":        ["zone","region"],
+            "BD":          ["bd"],
+        }
+        for label, hints in checks.items():
+            c = fcol(df.columns, *hints)
+            self.L(f"  {'✔' if c else '✗'} {label:15s} → '{c}'" if c
+                   else f"  ✗ {label:15s} — NOT FOUND",
+                   "success" if c else "warning")
+
+        lob_c = fcol(df.columns, "lob","line of business")
+        if lob_c:
+            self.L(f"  LOB unique values: {N(df[lob_c]).unique().tolist()}")
+        return df
+
+    # ─── Step 2 ───────────────────────────────────────────────────────────────
+    def step2_dealer_filter(self, df, dealer_f):
+        self.L("Step 2 ▸ 4S Dealer List filter …")
+        if dealer_f is None:
+            self.L("  No dealer list — skipping", "warning"); return df
+        dl = read_file(dealer_f)
+        if dl is None or dl.empty:
+            self.L("  Dealer list empty — skipping", "warning"); return df
+
+        dn_col = (fcol(dl.columns, "dealer no","dealer no.","dealerno",
+                       "customer number","dealer number","customer account number",
+                       "cust no","account number","customer acct number")
+                  or dl.columns[0])
+        self.L(f"  Dealer file column: '{dn_col}'")
+
+        dealer_nos     = set(v for v in N(dl[dn_col]).tolist() if v not in ("","NAN"))
+        dealer_nos_num = set("".join(c for c in v if c.isdigit()) for v in dealer_nos if v)
+        self.L(f"  {len(dealer_nos)} dealer numbers | samples: {list(dealer_nos)[:5]}")
+
+        vn_col = fcol(df.columns, "customer account number","customer number",
+                      "dealer number","dealer no","cust no","account number",
+                      "customer acct number")
+        if not vn_col:
+            self.L("  ⚠ Customer Number col NOT FOUND in VLDS — skipping filter","warning")
+            return df
+
+        self.L(f"  VLDS column: '{vn_col}'")
+        vlds_nos = N(df[vn_col])
+        self.L(f"  VLDS samples: {vlds_nos.unique()[:5].tolist()}")
+
+        before = len(df)
+        mask   = vlds_nos.isin(dealer_nos)
+        if mask.sum() == 0:
+            self.L("  Exact=0 — numeric fallback …","warning")
+            vlds_num = vlds_nos.apply(lambda x: "".join(c for c in x if c.isdigit()))
+            mask = vlds_num.isin(dealer_nos_num)
+            if mask.sum() > 0:
+                self.L(f"  Numeric fallback: {mask.sum():,} rows","success")
+            else:
+                self.L("  ⚠ Both exact & numeric = 0. All rows kept.","error")
+                return df
+
+        df = df[mask].copy()
+        rev_col = fcol(df.columns,"revenue amount","revenue_amount")
+        self.L(f"  {before:,} → {len(df):,} rows"
+               + (f"  ₹{to_num(df[rev_col]).sum()/1e7:,.1f} Cr" if rev_col else ""),
+               "success")
+        return df
+
+    # ─── Step 3 ───────────────────────────────────────────────────────────────
+    def step3_lob(self, df):
+        self.L("Step 3 ▸ LOB eligibility filter …")
+        lob_col = fcol(df.columns,"lob","line of business")
+        rem_col = fcol(df.columns,"remark","remarks","consider for vd",
+                       "consider for vlds","eligible sales/ not eligible")
+        if not lob_col:
+            self.L("  LOB col not found — all rows eligible","warning"); return df
+
+        df = df.copy()
+        if not rem_col:
+            df["Remark"] = ""; rem_col = "Remark"
+
+        lob_n = N(df[lob_col])
+        ELIGIBLE_LOB = {"PARTS","HIGHWAY","PARTS OFF HIGHWAY","PARTS ON HIGHWAY",
+                        "PARTS-OFF HIGHWAY","PARTS-ON HIGHWAY",
+                        "PARTS OFFHIGHWAY","PARTS ONHIGHWAY"}
+        NAMED_EXCL   = {"CBD","NEW ENGINE","REBUILD","SOLUTIONS"}
+
+        already = N(df[rem_col]) != ""
+        flag_n  = lob_n.isin(NAMED_EXCL) & ~already
+        df.loc[flag_n, rem_col] = "No-Other LOB"
+        flag_r  = (~lob_n.isin(ELIGIBLE_LOB|NAMED_EXCL)) & ~already & ~flag_n
+        df.loc[flag_r, rem_col] = "No-Other LOB"
+
+        self.L(f"  PARTS rows: {lob_n.isin(ELIGIBLE_LOB).sum():,}  "
+               f"Non-eligible flagged: {(flag_n|flag_r).sum():,}","success")
+        for v in lob_n.unique():
+            s = "✔ ELIGIBLE" if v in ELIGIBLE_LOB else "✗ EXCLUDED"
+            self.L(f"    '{v}': {(lob_n==v).sum():,} → {s}")
+        return df
+
+    # ─── Step 4 ───────────────────────────────────────────────────────────────
+    def step4_exclusions(self, df):
+        self.L("Step 4 ▸ Applying exclusion list …")
+        rem_col  = fcol(df.columns,"remark","remarks","consider for vd") or "Remark"
+        inv_col  = fcol(df.columns,"invoice type","invoicetype",
+                        "order header subtype code","transaction type")
+        line_col = fcol(df.columns,"line item","line item description",
+                        "inventory item description","item description")
+        item_col = fcol(df.columns,"item number","item_number","item no","item")
+        batch_col= fcol(df.columns,"batch source","batchsource")
+        seg_col  = fcol(df.columns,"segment")
+
+        df = df.copy()
+        if rem_col not in df.columns: df[rem_col] = ""
+
+        total_flagged = 0
+        for _, row in self.excl.iterrows():
+            part     = str(row.get("Particulars","")).strip()
+            item_n   = str(row.get("Item No","NA")).strip().upper()
+            col_hint = str(row.get("Column","Line Item")).strip().upper()
+            if not part: continue
+            part_upper = part.upper()
+            target = (inv_col   if "INVOICE" in col_hint or "TRANSACTION" in col_hint else
+                      batch_col if "BATCH"   in col_hint else
+                      seg_col   if "SEGMENT" in col_hint else line_col)
+            already  = N(df[rem_col]) != ""
+            mask     = pd.Series(False, index=df.index)
+            if target and target in df.columns:
+                mask |= N(df[target]).str.contains(part_upper, regex=False, na=False)
+            if item_n not in ("NA","N/A","") and item_col and item_col in df.columns:
+                mask |= (N(df[item_col]) == item_n)
+            new_f = mask & ~already
+            if new_f.sum() > 0:
+                df.loc[new_f, rem_col] = f"No-{part}"; total_flagged += new_f.sum()
+
+        self.L(f"  Exclusion list flagged {total_flagged:,} rows","success")
+        return df
+
+    # ─── Step 5 ───────────────────────────────────────────────────────────────
+    def step5_dfrecd(self, df, dfrecd_f):
+        self.L("Step 5 ▸ DF&RECD exclusion …")
+        rem_col  = fcol(df.columns,"remark","remarks","consider for vd") or "Remark"
+        bd_col   = fcol(df.columns,"bd")
+        inv_col  = fcol(df.columns,"invoice number","invoice no","invoice_number")
+        item_col = fcol(df.columns,"item number","item_number","item no","item")
+        rev_col  = fcol(df.columns,"revenue amount","revenue_amount")
+
+        df = df.copy()
+        if rem_col not in df.columns: df[rem_col] = ""
+
+        recd_keys: set = set()
+        if dfrecd_f is not None:
+            try:
+                q_dr = quarter_from_filename(dfrecd_f.name)
+                y_dr = year_from_filename(dfrecd_f.name)
+                self.L(f"  DF&RECD: q={q_dr} y={y_dr}")
+                # Only fill if UI didn't already set
+                if not self.stats.get("quarter"): self.stats["quarter"] = q_dr
+                if not self.stats.get("year"):    self.stats["year"]    = y_dr
+
+                dr = read_file(dfrecd_f)
+                if dr is not None and not dr.empty:
+                    self.L(f"  DF&RECD: {len(dr):,} rows")
+                    d_inv  = fcol(dr.columns,"invoice number","invoice no") or dr.columns[0]
+                    d_item = fcol(dr.columns,"item number","item no","item")
+                    d_rev  = fcol(dr.columns,"revenue amount","revenue_amount")
+                    inv_s  = dr[d_inv].fillna("").astype(str).str.strip()
+                    item_s = (dr[d_item].fillna("").astype(str).str.strip()
+                              if d_item else pd.Series([""]*len(dr)))
+                    rev_s  = (dr[d_rev].fillna("").astype(str).str.strip()
+                              if d_rev else pd.Series([""]*len(dr)))
+                    recd_keys = set((inv_s+item_s+rev_s).tolist())
+                    recd_keys.discard("")
+                    self.L(f"  {len(recd_keys):,} DF&RECD keys built")
+            except Exception as e:
+                self.L(f"  WARNING: DF&RECD error: {e}","warning")
+
+        if not self.stats.get("quarter"): self.stats["quarter"] = "Q4"
+        if not self.stats.get("year"):    self.stats["year"]    = str(datetime.now().year)
+
+        already = N(df[rem_col]) != ""
+        matched_bd = 0
+        if bd_col and bd_col in df.columns and recd_keys:
+            bd_mask = df[bd_col].fillna("").astype(str).str.strip().isin(recd_keys) & ~already
+            df.loc[bd_mask, rem_col] = "No-DF/RECD"
+            matched_bd = bd_mask.sum()
+            already = N(df[rem_col]) != ""
+
+        matched_key = 0
+        if recd_keys and inv_col and rev_col:
+            inv_s = df[inv_col].fillna("").astype(str).str.strip()
+            item_s= (df[item_col].fillna("").astype(str).str.strip()
+                     if item_col else pd.Series([""]*len(df), index=df.index))
+            rev_s = df[rev_col].fillna("").astype(str).str.strip()
+            key_mask = (inv_s+item_s+rev_s).isin(recd_keys) & ~already
+            df.loc[key_mask, rem_col] = "No-DF/RECD"
+            matched_key = key_mask.sum()
+
+        self.L(f"  DF&RECD flagged: {matched_bd+matched_key:,}","success")
+        return df
+
+    # ─── Step 6 ───────────────────────────────────────────────────────────────
+    def step6_eligible(self, df):
+        self.L("Step 6 ▸ Identifying eligible records …")
+        rem_col = fcol(df.columns,"remark","remarks","consider for vd",
+                       "consider for vlds","eligible sales/ not eligible")
+        if rem_col:
+            rm_norm  = N(df[rem_col])
+            eligible = df[rm_norm == ""].copy()
+            self.L(f"  Remark col: '{rem_col}'")
+            for val, cnt in rm_norm.value_counts().head(10).items():
+                self.L(f"    {'✔ ELIGIBLE' if val=='' else val}: {cnt:,} rows")
+        else:
+            eligible = df.copy()
+            self.L("  No Remark col — all rows eligible","warning")
+
+        rev_col  = fcol(eligible.columns,"revenue amount","revenue_amount")
+        sales_cr = to_num(eligible[rev_col]).sum()/1e7 if rev_col else 0.0
+        self.stats.update(eligible=len(eligible),
+                          excluded=self.stats.get("total",0)-len(eligible),
+                          sales_cr=sales_cr)
+        self.L(f"  Eligible: {len(eligible):,} rows | ₹{sales_cr:,.2f} Cr","success")
+        if len(eligible) == 0:
+            self.L("  ⚠ ELIGIBLE=0! Check Step 2 (dealer filter) and Step 3 (LOB).","error")
+        return eligible
+
+    # ─── Step 7 ───────────────────────────────────────────────────────────────
+    def step7_pivot(self, eligible):
+        self.L("Step 7 ▸ Building quarterly pivot …")
+        cn_col  = fcol(eligible.columns,"customer account name","customer name")
+        no_col  = fcol(eligible.columns,"customer account number","customer number",
+                       "dealer number","dealer no")
+        rev_col = fcol(eligible.columns,"revenue amount","revenue_amount")
+        mo_col  = fcol(eligible.columns,"reporting to fiscal month",
+                       "reporting fiscal month name","fiscal month","cmi month","month")
+        zn_col  = fcol(eligible.columns,"zone","region")
+
+        if not rev_col:
+            self.L("  Revenue col not found","error"); return pd.DataFrame()
+        idx = [c for c in [cn_col, no_col, zn_col] if c]
+        if not idx:
+            self.L("  No customer ID cols","error"); return pd.DataFrame()
+
+        elig = eligible.copy()
+        elig[rev_col] = to_num(elig[rev_col])
+
+        if mo_col:
+            def norm_month(v):
+                v = str(v).strip()
+                if re.match(r"^\d{4}/\d{1,2}$", v): return v
+                if re.match(r"^\d{4}-\d{1,2}$", v): return v.replace("-","/")
+                mm = {"jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06",
+                      "jul":"07","aug":"08","sep":"09","oct":"10","nov":"11","dec":"12"}
+                for mn, num in mm.items():
+                    if mn in v.lower():
+                        m = re.search(r"(\d{2,4})", v)
+                        if m:
+                            yr = m.group(1)
+                            return f"{'20'+yr if len(yr)==2 else yr}/{num}"
+                return v
+
+            elig["_mo"] = elig[mo_col].apply(norm_month)
+            try:
+                pv = pd.pivot_table(elig, values=rev_col, index=idx, columns="_mo",
+                                    aggfunc="sum", fill_value=0).reset_index()
+                pv.columns.name = None
+                mc = [c for c in pv.columns if c not in idx]
+                for c in mc:
+                    pv[c] = pd.to_numeric(pv[c], errors="coerce").fillna(0.0)
+                pv["Grand Total"] = pv[mc].sum(axis=1)
+                self.L(f"  Pivot: {len(pv)} customers × {len(mc)} months","success")
+                return pv
+            except Exception as e:
+                self.L(f"  Pivot error ({e}) — totals fallback","warning")
+
+        grp = elig.groupby(idx)[rev_col].sum().reset_index()
+        grp.rename(columns={rev_col:"Current Quarter Sales"}, inplace=True)
+        self.L(f"  Totals (no month col): {len(grp)} rows","success")
+        return grp
+
+    # ─── Step 8 ───────────────────────────────────────────────────────────────
+    # Column order: Customer Name | Zone | Customer Number |
+    #   Final Amount Q4-25 | Q4-24 | Final Amount Q4-24 |
+    #   Increase | Growth % | Discount % | Discount Value
+    def step8_summary(self, pivot, prev_f,
+                      prev_join_col=None, prev_amt_col=None,
+                      slab_type="quarterly"):
+        self.L("Step 8 ▸ Building Final Summary …")
+
+        quarter  = self.stats.get("quarter","Q4")
+        year     = str(self.stats.get("year", datetime.now().year))
+        yr2      = year[-2:]
+        prev_yr2 = str(int(yr2)-1).zfill(2)
+        curr_lbl = f"{quarter}-{yr2}"
+        prev_lbl = f"{quarter}-{prev_yr2}"
+        self.L(f"  Labels: curr={curr_lbl} prev={prev_lbl}")
+
+        # ID cols from pivot
+        cn = next((c for c in pivot.columns if any(k in c.lower() for k in
+                   ["account name","customer name","customername"])), None)
+        co = next((c for c in pivot.columns if any(k in c.lower() for k in
+                   ["account number","customer number","customer_number",
+                    "cust no","dealer number","dealer no"])), None)
+        zn = next((c for c in pivot.columns
+                   if c.lower() in ["zone","region","territory"]), None)
+
+        curr_col = ("Grand Total"           if "Grand Total"           in pivot.columns else
+                    "Current Quarter Sales" if "Current Quarter Sales" in pivot.columns else
+                    pivot.columns[-1])
+
+        sm = pivot.copy()
+        sm[curr_col] = pd.to_numeric(
+            sm[curr_col].astype(str).str.replace(",","",regex=False),
+            errors="coerce").fillna(0.0)
+
+        fa_curr = f"Final Amount {curr_lbl}"
+        fa_prev = f"Final Amount {prev_lbl}"
+        sm[fa_curr]  = sm[curr_col]
+        sm["Zone"]   = (sm[zn].fillna("").astype(str) if zn else
+                        sm.get("Zone", pd.Series([""] * len(sm), index=sm.index)))
+        sm[prev_lbl] = 0.0
+        sm[fa_prev]  = 0.0
+
+        # ── Merge prev year ───────────────────────────────────────────────────
+        if prev_f:
+            try:
+                pf = read_file(prev_f)
+                if pf is None or pf.empty:
+                    self.L("  ⚠ Prev year file empty","warning")
+                else:
+                    self.L("  Prev year cols: " + " | ".join(pf.columns.tolist()))
+                    self.L(f"  Prev year rows: {len(pf)}")
+
+                    # ── Join column ───────────────────────────────────────────
+                    if prev_join_col and prev_join_col in pf.columns:
+                        jc = prev_join_col
+                        self.L(f"  USER join col: '{jc}'")
+                    else:
+                        jc = (fcol(pf.columns,"customer account number","customer number",
+                                   "dealer number","dealer no","cust no") or
+                              fcol(pf.columns,"customer account name","customer name") or
+                              pf.columns[0])
+                        self.L(f"  Auto join col: '{jc}'")
+
+                    # ── Amount column ─────────────────────────────────────────
+                    if prev_amt_col and prev_amt_col in pf.columns:
+                        pa = prev_amt_col
+                        self.L(f"  USER amount col: '{pa}'")
+                    else:
+                        pa = None
+                        col_lc = {c.lower().strip():c for c in pf.columns}
+                        for nm in [prev_lbl.lower(),
+                                   f"q{quarter[-1]}-{prev_yr2}",
+                                   f"q{quarter[-1]} {prev_yr2}",
+                                   f"final amount {prev_lbl.lower()}",
+                                   f"final amount q{quarter[-1]}-{prev_yr2}",
+                                   "grand total","total sales","previous quarter"]:
+                            if nm in col_lc: pa = col_lc[nm]; break
+                        if not pa:
+                            best_c, best_s = None, 0
+                            for c in pf.columns[2:]:
+                                sc = pd.to_numeric(
+                                    pf[c].astype(str).str.replace(",","",regex=False),
+                                    errors="coerce").notna().mean()
+                                if sc > best_s: best_s, best_c = sc, c
+                            if best_c and best_s > 0.3: pa = best_c
+                        self.L(f"  Auto amount col: '{pa}'")
+
+                    if not pa:
+                        self.L(f"  ⚠ Amount col not found — select manually","error")
+                    else:
+                        j_samp = pf[jc].dropna().astype(str).str.strip().unique()[:5].tolist()
+                        a_samp = pf[pa].dropna().unique()[:4].tolist()
+                        self.L(f"  Prev year join samples: {j_samp}")
+                        self.L(f"  Prev year amount samples: {a_samp}")
+
+                        # Build lookup: group by join col → sum amount
+                        pf_w         = pf.copy()
+                        pf_w["_amt"] = pf_w[pa].apply(lambda x: safe_num(str(x).replace(",","")))
+                        pg           = pf_w.groupby(jc, as_index=False)["_amt"].sum()
+                        pg.columns   = ["_jk", prev_lbl]
+
+                        pz = fcol(pf.columns,"zone","region")
+                        if pz:
+                            zg = pf_w[[jc,pz]].drop_duplicates(subset=[jc])
+                            zg.columns = ["_jk","_zp"]
+                            pg = pg.merge(zg, on="_jk", how="left")
+                        extra = ["_zp"] if "_zp" in pg.columns else []
+
+                        # ── Try merging on every possible customer ID col ──────
+                        # Also try directly on the user-selected join col value
+                        # (handles case where pivot col name ≠ prev file col name)
+                        pivot_id_cols = [co, cn]
+
+                        # Build normalised prev-year key series once
+                        pgk_upper = pg["_jk"].fillna("").astype(str).str.strip().str.upper()
+                        pgk_num   = pgk_upper.apply(lambda x: "".join(c for c in x if c.isdigit()))
+
+                        merged = False
+                        for pcol in pivot_id_cols:
+                            if not pcol or pcol not in sm.columns:
+                                continue
+
+                            smk_upper = sm[pcol].fillna("").astype(str).str.strip().str.upper()
+                            smk_num   = smk_upper.apply(lambda x: "".join(c for c in x if c.isdigit()))
+
+                            # Try 1: exact upper match
+                            pg_n = pg.copy(); pg_n["_nk"] = pgk_upper
+                            sm_n = sm.copy(); sm_n["_nk"] = smk_upper
+                            t = sm_n.merge(pg_n[["_nk",prev_lbl]+extra],
+                                           on="_nk", how="left", suffixes=("","_r"))
+                            matched = int(t[prev_lbl].notna().sum())
+                            self.L(f"  Exact merge on '{pcol}': {matched}/{len(sm)}")
+
+                            # Try 2: numeric-only fallback
+                            if matched == 0:
+                                pg_n2 = pg.copy(); pg_n2["_nk"] = pgk_num
+                                sm_n2 = sm.copy(); sm_n2["_nk"] = smk_num
+                                t2 = sm_n2.merge(pg_n2[["_nk",prev_lbl]+extra],
+                                                  on="_nk", how="left", suffixes=("","_r"))
+                                m2 = int(t2[prev_lbl].notna().sum())
+                                if m2 > matched:
+                                    self.L(f"  Numeric fallback '{pcol}': {m2} matched")
+                                    t, matched = t2, m2
+
+                            if matched < len(sm) and "_nk" in t.columns:
+                                un = t.loc[t[prev_lbl].isna(),"_nk"].unique()[:5].tolist()
+                                self.L(f"  Unmatched pivot samples: {un}")
+                                self.L(f"  Prev year key samples: {pgk_upper.unique()[:5].tolist()}")
+
+                            if matched > 0:
+                                sm = t.copy()
+                                sm[prev_lbl] = sm[prev_lbl].apply(
+                                    lambda x: safe_num(str(x)) if pd.notna(x) else 0.0)
+                                if "_zp" in sm.columns:
+                                    blank = sm["Zone"].fillna("").str.strip() == ""
+                                    sm.loc[blank,"Zone"] = sm.loc[blank,"_zp"].fillna("")
+                                    sm.drop(columns=["_zp"], inplace=True)
+                                for dc in ["_nk","_jk",f"{prev_lbl}_r"]:
+                                    if dc in sm.columns: sm.drop(columns=[dc], inplace=True)
+                                self.L(f"  ✔ {prev_lbl} merged on '{pcol}': {matched} rows","success")
+                                merged = True
+                                break
+
+                        if not merged:
+                            self.L(f"  ✘ {prev_lbl} merge FAILED — 0 rows matched. "
+                                   "Use dropdowns to select correct columns.","warning")
+
+            except Exception as e:
+                self.L(f"  ERROR in prev year merge: {e}","error")
+                self.L("  "+traceback.format_exc(),"error")
+
+        # ── Calculations ──────────────────────────────────────────────────────
+        payout_col = ("Quarterly Payout(%)" if "quarterly" in slab_type.lower()
+                      else "Annual Payout(%)")
+        q_curr = sm[fa_curr].apply(safe_num)
+        q_prev = sm[prev_lbl].apply(lambda x: safe_num(str(x)) if pd.notna(x) else 0.0)
+
+        sm[fa_curr]         = q_curr
+        sm[fa_prev]         = q_prev    # Final Amount Q4-24 = same values as Q4-24 raw
+        sm["Increase"]      = q_curr - q_prev
+        prev_safe           = q_prev.replace(0, np.nan)
+        sm["Growth %"]      = ((sm["Increase"]/prev_safe*100)
+                               .replace([np.inf,-np.inf],0).fillna(0))
+        sm["Discount %"]    = sm["Growth %"].apply(lambda g: self._slab_lookup(g, payout_col))
+        sm["Discount Value"]= (q_curr * sm["Discount %"] / 100).fillna(0)
+
+        for c in sm.select_dtypes(include=[np.number]).columns:
+            sm[c] = sm[c].replace([np.inf,-np.inf],0).fillna(0)
+
+        # ── Final column order ────────────────────────────────────────────────
+        if zn and zn in sm.columns and zn != "Zone":
+            sm.rename(columns={zn:"Zone"}, inplace=True)
+        rn = {}
+        if cn and cn in sm.columns: rn[cn] = "Customer Name"
+        if co and co in sm.columns: rn[co] = "Customer Number"
+        sm.rename(columns=rn, inplace=True)
+        cn_f = "Customer Name"   if cn else None
+        co_f = "Customer Number" if co else None
+
+        id_c   = [c for c in [cn_f,"Zone",co_f] if c and c in sm.columns]
+        calc_c = [fa_curr, prev_lbl, fa_prev,
+                  "Increase","Growth %","Discount %","Discount Value"]
+        sm = sm[[c for c in id_c+calc_c if c in sm.columns]].copy()
+
+        self.L(f"  Final Summary: {len(sm)} rows | {list(sm.columns)}","success")
+        return sm, curr_lbl
+
+    def _slab_lookup(self, growth_pct, payout_col):
+        g = safe_num(growth_pct)
+        for _, r in self.slab.iterrows():
+            try:
+                lo = float(r.get("Growth Min(%)",0) or 0)
+                hi = float(r.get("Growth Max(%)",9999) or 9999)
+                if lo <= g < hi:
+                    return float(r.get(payout_col, r.get("Quarterly Payout(%)",0)) or 0)
+            except Exception:
+                continue
+        return 0.0
+
+    # ─── Step 9 ───────────────────────────────────────────────────────────────
+    def step9_excel(self, pivot, summary, eligible, curr_lbl):
+        self.L("Step 9 ▸ Writing Excel report …")
+        out  = BytesIO()
+        NAVY = "#1A1A1A"; ALT  = "#F5F5F5"; WHITE = "#FFFFFF"; GOLD = "#D97706"
+        ts   = datetime.now().strftime("%d %b %Y  %H:%M")
+
+        FORCE_TEXT = {"Customer Name","Customer Number","Customer Account Name",
+                      "Customer Account Number","Zone","Region","Dealer Number",
+                      "Customer No","Account Number","Account Name"}
+
+        def _is_pct(col):   return "%" in str(col)
+        def _is_text(col):
+            if col in FORCE_TEXT: return True
+            return any(k in str(col).lower() for k in
+                       ["customer","account","zone","name","region"])
+        def _is_num(col, df):
+            if _is_text(col): return False
+            if re.match(r"^\d{4}/\d{1,2}$", str(col)): return True
+            if any(k in str(col).upper() for k in
+                   ["TOTAL","AMOUNT","SALES","REVENUE","VALUE","INCREASE",
+                    "Q1","Q2","Q3","Q4"]): return True
+            if _is_pct(col): return True
+            ne = df[col].astype(str).str.strip().replace("",np.nan).dropna()
+            if len(ne) == 0: return False
+            return pd.to_numeric(ne.str.replace(",","",regex=False),
+                                 errors="coerce").notna().mean() >= 0.6
+
+        def _flt(v):
+            if isinstance(v,(int,float)):
+                return 0.0 if (pd.isna(v) or np.isinf(v)) else float(v)
+            try:
+                f = float(str(v).replace(",","").strip())
+                return 0.0 if (pd.isna(f) or np.isinf(f)) else f
+            except: return 0.0
+
+        with xlsxwriter.Workbook(out, {"nan_inf_to_errors":True}) as wb:
+            def F(**kw): return wb.add_format(kw)
+            fH  = F(bold=True,bg_color=NAVY,font_color=WHITE,border=1,
+                    align="center",valign="vcenter",text_wrap=True,font_size=9)
+            fHg = F(bold=True,bg_color=GOLD,font_color=WHITE,border=1,
+                    align="center",valign="vcenter",text_wrap=True,font_size=9)
+            ftx = F(border=1,align="left",num_format="@",font_size=9)
+            fta = F(border=1,align="left",num_format="@",bg_color=ALT,font_size=9)
+            fnu = F(border=1,num_format="#,##0.00",font_size=9)
+            fna = F(border=1,num_format="#,##0.00",bg_color=ALT,font_size=9)
+            fpc = F(border=1,num_format="0.00%",font_size=9)
+            fpa = F(border=1,num_format="0.00%",bg_color=ALT,font_size=9)
+            fTo = F(bold=True,bg_color=NAVY,font_color=WHITE,border=1,
+                    num_format="#,##0.00",font_size=9)
+            fTl = F(bold=True,bg_color=NAVY,font_color=WHITE,border=1,font_size=9)
+            fTp = F(bold=True,bg_color=NAVY,font_color=WHITE,border=1,
+                    num_format="0.00%",font_size=9)
+            fTi = F(bold=True,font_size=12,font_color=NAVY,
+                    align="center",valign="vcenter")
+            fSu = F(italic=True,font_size=8,font_color="#888888",align="center")
+
+            def write_sheet(ws, df_in, title, hdr_fmt=None):
+                if df_in is None or df_in.empty:
+                    ws.write(0,0,title+" — No data",fTi); return
+                HF = hdr_fmt or fH
+                df = df_in.copy()
+                nc = len(df.columns)
+                num_cols = {c for c in df.columns if _is_num(c,df)}
+                for c in num_cols:
+                    df[c] = pd.to_numeric(
+                        df[c].astype(str).str.replace(",","",regex=False),
+                        errors="coerce").fillna(0.0)
+
+                ws.merge_range(0,0,0,nc-1,title,fTi);         ws.set_row(0,20)
+                ws.merge_range(1,0,1,nc-1,f"Forest Dealerships  |  {ts}",fSu)
+                ws.set_row(1,13)
+                for ci,col in enumerate(df.columns):
+                    ws.write(2,ci,str(col),HF)
+                    ws.set_column(ci,ci,max(16,len(str(col))+3))
+                ws.set_row(2,26); ws.freeze_panes(3,1)
+
+                for ri,(_,row) in enumerate(df.iterrows()):
+                    alt = ri%2==1
+                    for ci,col in enumerate(df.columns):
+                        v = row[col]
+                        if col in num_cols:
+                            fv = _flt(v)
+                            if _is_pct(col):
+                                ws.write(3+ri,ci, fv/100.0, fpa if alt else fpc)
+                            else:
+                                ws.write(3+ri,ci, fv, fna if alt else fnu)
+                        else:
+                            ws.write_string(3+ri,ci,
+                                str(v) if v is not None else "",
+                                fta if alt else ftx)
+
+                last = 3+len(df)
+                ws.write(last,0,"GRAND TOTAL",fTl)
+                for ci,col in enumerate(df.columns[1:],1):
+                    if col in num_cols:
+                        if _is_pct(col):
+                            ws.write(last,ci,float(df[col].mean())/100.0,fTp)
+                        else:
+                            ws.write(last,ci,float(df[col].sum()),fTo)
+                    else:
+                        ws.write(last,ci,"",fTl)
+
+            ws1 = wb.add_worksheet("Quarterly Pivot")
+            write_sheet(ws1, pivot, f"VLDS {curr_lbl} — Quarterly Sales Pivot")
+
+            ws2 = wb.add_worksheet("Final Summary")
+            write_sheet(ws2, summary, f"VLDS {curr_lbl} — Final Incentive Summary", fHg)
+
+            ws3 = wb.add_worksheet("Eligible Data (Review)")
+            if eligible is not None and not eligible.empty:
+                nc = len(eligible.columns)
+                ws3.merge_range(0,0,0,nc-1,
+                    f"VLDS {curr_lbl} — Eligible Transactions | Client Review",fTi)
+                ws3.set_row(0,20)
+                ws3.merge_range(1,0,1,nc-1,
+                    f"All eligible records after exclusions  |  {ts}",fSu)
+                ws3.set_row(1,13)
+                elig_df  = eligible.copy()
+                elig_num = {c for c in elig_df.columns if _is_num(c,elig_df)}
+                for c in elig_num:
+                    elig_df[c] = pd.to_numeric(
+                        elig_df[c].astype(str).str.replace(",","",regex=False),
+                        errors="coerce").fillna(0.0)
+                for ci,col in enumerate(elig_df.columns):
+                    ws3.write(2,ci,str(col),fH)
+                    ws3.set_column(ci,ci,max(14,len(str(col))+3))
+                ws3.set_row(2,24); ws3.freeze_panes(3,0)
+                ws3.autofilter(2,0,2+len(elig_df),nc-1)
+                for ri,(_,row) in enumerate(elig_df.iterrows()):
+                    alt = ri%2==1
+                    for ci,col in enumerate(elig_df.columns):
+                        v = row[col]
+                        if col in elig_num:
+                            ws3.write(3+ri,ci,_flt(v),fna if alt else fnu)
+                        else:
+                            ws3.write_string(3+ri,ci,
+                                str(v) if v is not None else "",
+                                fta if alt else ftx)
+            else:
+                ws3.write(0,0,"No eligible records found",fTi)
+
+        out.seek(0)
+        self.L("  Excel written ✓","success")
+        return out.getvalue()
+
+    # ─── Main run ─────────────────────────────────────────────────────────────
+    def run(self, vlds_f, dfrecd_f, prev_f, dealer_f,
+            prev_join_col=None, prev_amt_col=None,
+            slab_type="quarterly", cb=None):
+        def p(pct,msg):
+            if cb: cb(pct,msg)
+
+        p(5,  "Loading VLDS main file …");         df = self.step1_load(vlds_f)
+        p(13, "Filtering by 4S Dealer List …");    df = self.step2_dealer_filter(df, dealer_f)
+        p(22, "LOB eligibility filter …");         df = self.step3_lob(df)
+        p(34, "Applying exclusion list …");        df = self.step4_exclusions(df)
+        p(47, "DF&RECD exclusion …");              df = self.step5_dfrecd(df, dfrecd_f)
+        p(58, "Identifying eligible records …");   eligible = self.step6_eligible(df)
+        p(68, "Building quarterly pivot …");       pivot    = self.step7_pivot(eligible.copy())
+        p(80, "Building final summary …")
+        summary, curr_lbl = self.step8_summary(
+            pivot.copy(), prev_f,
+            prev_join_col=prev_join_col, prev_amt_col=prev_amt_col,
+            slab_type=slab_type)
+        p(93, "Writing Excel report …");           output = self.step9_excel(pivot,summary,eligible,curr_lbl)
+        p(100,"Done ✓")
+        return output, self.log, self.stats
+
+
+                
