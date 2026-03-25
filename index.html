@@ -1,1 +1,410 @@
 
+# app.py | VLDS Quarterly Incentive Processor — Forest Dealerships
+# Run: streamlit run app.py
+import streamlit as st
+import pandas as pd
+import traceback
+import io
+
+from config    import DEFAULT_EXCL, DEFAULT_SLABS
+from utils     import parse_excl, parse_slab, read_file
+from processor import VLDSProcessor
+
+st.set_page_config(
+    page_title="VLDS Incentive Processor — Forest Dealerships",
+    page_icon="🏭",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Reset & base ── */
+[data-testid="stAppViewContainer"]{background:#F4F6FA;}
+section.main > div{padding:0.6rem 1.4rem 1rem!important;}
+[data-testid="stVerticalBlock"]{gap:0.3rem!important;}
+#MainMenu,footer,header{visibility:hidden;}
+div[data-testid="stDecoration"]{display:none;}
+div[data-testid="stHorizontalBlock"]{gap:0.5rem!important;}
+
+/* ── Header bar ── */
+.hdr{
+  background:#1A1A1A;
+  border-radius:8px;padding:.55rem 1.2rem;
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:.5rem;
+}
+.hdr-left{display:flex;align-items:center;gap:.7rem;}
+.hdr-logo{
+  width:32px;height:32px;background:#fff;border-radius:5px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:1.1rem;font-weight:900;color:#1A1A1A;flex-shrink:0;
+}
+.hdr-t{color:#fff;font-size:1.05rem;font-weight:800;letter-spacing:-.2px;line-height:1.1;}
+.hdr-s{color:rgba(255,255,255,.5);font-size:.68rem;}
+.hdr-right{display:flex;align-items:center;gap:.5rem;}
+.badge{
+  background:rgba(255,255,255,.1);color:#fff;border-radius:4px;
+  padding:3px 10px;font-size:.68rem;font-weight:700;
+  border:1px solid rgba(255,255,255,.2);white-space:nowrap;
+}
+.badge-gold{background:#B45309;border-color:#92400E;color:#FEF3C7;}
+
+/* ── Section label ── */
+.sec-lbl{
+  font-size:.62rem;font-weight:800;letter-spacing:1px;text-transform:uppercase;
+  color:#6B7280;margin:0 0 .2rem 0;padding:0;
+}
+
+/* ── File card grid ── */
+.fgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:.35rem;margin-bottom:.4rem;}
+.fcard{
+  background:#fff;border:1.5px solid #E5E7EB;border-radius:7px;
+  padding:.42rem .6rem;display:flex;flex-direction:column;gap:.15rem;
+  transition:border-color .15s;position:relative;
+}
+.fcard.loaded{border-color:#16A34A;background:#F0FDF4;}
+.fcard.optional{border-style:dashed;}
+.fcard-top{display:flex;align-items:center;gap:.35rem;}
+.fcard-icon{font-size:.95rem;line-height:1;}
+.fcard-name{font-size:.75rem;font-weight:700;color:#111827;line-height:1.2;}
+.fcard-sub{font-size:.62rem;color:#6B7280;line-height:1.2;}
+.ftag{font-size:.55rem;font-weight:700;border-radius:3px;padding:1px 5px;margin-left:auto;flex-shrink:0;}
+.ftag-req{color:#DC2626;background:#FEE2E2;}
+.ftag-opt{color:#059669;background:#D1FAE5;}
+.ftag-ok{color:#15803D;background:#DCFCE7;}
+
+/* ── Tighten Streamlit file uploader ── */
+[data-testid="stFileUploader"]{margin:0!important;padding:0!important;}
+[data-testid="stFileUploader"] > div{padding:0!important;}
+[data-testid="stFileUploader"] section{padding:.25rem .4rem!important;min-height:0!important;}
+[data-testid="stFileUploader"] section > div{gap:.2rem!important;}
+[data-testid="stFileUploader"] small{font-size:.6rem!important;}
+[data-testid="stFileUploader"] button{font-size:.65rem!important;padding:.15rem .5rem!important;}
+[data-testid="stFileUploaderDropzone"]{padding:.3rem!important;min-height:48px!important;}
+
+/* ── Config panel ── */
+.cfg-panel{
+  background:#fff;border:1px solid #E5E7EB;border-radius:7px;
+  padding:.5rem .8rem;margin-bottom:.4rem;
+}
+.cfg-panel-title{font-size:.7rem;font-weight:800;color:#1A1A1A;
+  letter-spacing:.3px;margin-bottom:.3rem;}
+
+/* ── Selectbox / radio tighten ── */
+[data-testid="stSelectbox"]{margin:0!important;}
+[data-testid="stSelectbox"] label{font-size:.68rem!important;margin-bottom:.1rem!important;}
+[data-testid="stRadio"]{margin:0!important;}
+[data-testid="stRadio"] label{font-size:.68rem!important;}
+[data-testid="stRadio"] > div{gap:.4rem!important;}
+
+/* ── Action bar ── */
+.action-bar{
+  background:#1A1A1A;border-radius:7px;
+  padding:.5rem .8rem;display:flex;align-items:center;
+  gap:.6rem;margin-bottom:.4rem;
+}
+
+/* ── Buttons ── */
+div[data-testid="stButton"]>button[kind="primary"]{
+  background:#D97706!important;color:#fff!important;border:none!important;
+  border-radius:6px!important;font-weight:800!important;font-size:.82rem!important;
+  padding:.45rem 1.2rem!important;
+  box-shadow:0 2px 8px rgba(217,119,6,.35)!important;white-space:nowrap;}
+div[data-testid="stButton"]>button[kind="primary"]:hover{background:#B45309!important;}
+div[data-testid="stButton"]>button:disabled{opacity:.4!important;}
+div[data-testid="stDownloadButton"]>button{
+  background:#16A34A!important;color:#fff!important;border:none!important;
+  border-radius:6px!important;font-weight:700!important;font-size:.78rem!important;
+  padding:.38rem 1rem!important;
+  box-shadow:0 2px 6px rgba(22,163,74,.3)!important;white-space:nowrap;}
+div[data-testid="stDownloadButton"]>button:hover{background:#15803D!important;}
+
+/* ── Stats strip ── */
+.stats-bar{
+  display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap;
+}
+.stat-item{text-align:center;}
+.stat-val{font-size:1.1rem;font-weight:900;line-height:1;}
+.stat-lbl{font-size:.58rem;color:rgba(255,255,255,.55);margin-top:1px;}
+
+/* ── Log box ── */
+.logbox{
+  background:#0D1117;border-radius:6px;padding:.6rem .8rem;
+  max-height:200px;overflow-y:auto;font-family:'Courier New',monospace;font-size:.68rem;
+  border:1px solid #21262D;
+}
+.lo{color:#3FB950;} .lw{color:#D29922;} .le{color:#F85149;} .li{color:#8B949E;}
+
+/* ── Progress ── */
+[data-testid="stProgress"]{margin:.2rem 0!important;}
+
+/* ── Expander tight ── */
+[data-testid="stExpander"]{margin:.2rem 0!important;}
+[data-testid="stExpanderDetails"]{padding:.3rem .4rem!important;}
+</style>
+""", unsafe_allow_html=True)
+
+# ─── Session state ─────────────────────────────────────────────────────────────
+_DEFAULTS = {
+    "files": {}, "result": None, "logs": [], "stats": {},
+    "prev_join_col": None, "prev_amt_col": None, "prev_cols": [],
+    "log_txt": "",
+}
+for k, v in _DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+S = st.session_state
+
+# ─── Header ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hdr">
+  <div class="hdr-left">
+    <div class="hdr-logo">F</div>
+    <div>
+      <div class="hdr-t">VLDS Incentive Processor</div>
+      <div class="hdr-s">Forest Dealerships · 4S Dealer Eligibility &amp; Payout Report</div>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <span class="badge">VLDS Pro v2</span>
+    <span class="badge badge-gold">Forest Dealerships</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─── File upload cards — 3-column grid ─────────────────────────────────────────
+FILE_DEFS = [
+    ("vlds_main",   "📊", "VLDS Main File",          "Current quarter VLDS data",     True),
+    ("df_recd",     "🔗", "DF & RECD File",           "Current quarter DF/RECD data",  True),
+    ("prev_year",   "📅", "Previous Year Summary",    "Q-1 year final summary file",   True),
+    ("dealer_list", "🏪", "4S Dealer List",           "Authorised dealer numbers",     True),
+    ("excl_file",   "📋", "Exclusion List",           "Optional custom exclusions",    False),
+    ("slab_file",   "📈", "Slab Table",               "Optional custom payout slabs",  False),
+]
+
+st.markdown('<p class="sec-lbl">📂 Input Files</p>', unsafe_allow_html=True)
+
+# Render 3-col grid using columns
+col_chunks = [FILE_DEFS[i:i+3] for i in range(0, len(FILE_DEFS), 3)]
+for chunk in col_chunks:
+    cols = st.columns(3, gap="small")
+    for i, (key, icon, name, sub, req) in enumerate(chunk):
+        loaded = key in S.files
+        with cols[i]:
+            card_cls = "fcard loaded" if loaded else ("fcard optional" if not req else "fcard")
+            tag = ('<span class="ftag ftag-ok">✓ Loaded</span>' if loaded else
+                   f'<span class="ftag {"ftag-req" if req else "ftag-opt"}">{"REQ" if req else "OPT"}</span>')
+            st.markdown(
+                f'<div class="{card_cls}">'
+                f'<div class="fcard-top"><span class="fcard-icon">{icon}</span>'
+                f'<span class="fcard-name">{name}</span>{tag}</div>'
+                f'<div class="fcard-sub">{sub}</div></div>',
+                unsafe_allow_html=True)
+            up = st.file_uploader("_", type=["xlsx","xls","csv"],
+                                   key=f"fu_{key}", label_visibility="collapsed")
+            if up:
+                if up.size > 209_715_200:
+                    st.error("File exceeds 200 MB")
+                else:
+                    S.files[key] = up
+                    st.toast(f"✅ {up.name}")
+
+# ─── Config panel — Previous year mapping + Quarter/Year/Slab ──────────────────
+st.markdown('<p class="sec-lbl" style="margin-top:.3rem;">⚙️ Configuration</p>',
+            unsafe_allow_html=True)
+st.markdown('<div class="cfg-panel">', unsafe_allow_html=True)
+st.markdown('<div class="cfg-panel-title">Report Settings &amp; Previous Year Column Mapping</div>',
+            unsafe_allow_html=True)
+
+cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns([1.2, 1.2, 1.4, 1.4, 1.4], gap="small")
+
+with cfg1:
+    quarter_sel = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4"], index=3, key="sel_qtr")
+with cfg2:
+    current_year = 2025
+    year_sel = st.selectbox("Year", list(range(2022, 2029)), index=3, key="sel_yr",
+                             help="Select the current quarter year")
+with cfg3:
+    slab_type = st.radio("Payout Type", ["Quarterly","Annual"],
+                          horizontal=True, index=0, key="slab_type_r")
+
+_prev_cols_available = []
+with cfg4:
+    if "prev_year" in S.files:
+        try:
+            _pf = S.files["prev_year"]; _pf.seek(0)
+            _fn = _pf.name.lower()
+            if _fn.endswith(".csv"):
+                _tmp = pd.read_csv(_pf, nrows=3, dtype=str)
+            else:
+                _pf.seek(0)
+                _raw = pd.read_excel(_pf, header=None, nrows=15, dtype=str)
+                _br, _bs = 0, 0
+                for _i, _row in _raw.iterrows():
+                    _sc = sum(1 for v in _row if pd.notna(v) and len(str(v).strip()) > 1)
+                    if _sc > _bs: _bs, _br = _sc, _i
+                _pf.seek(0)
+                _tmp = pd.read_excel(_pf, header=int(_br), nrows=3, dtype=str)
+            _pf.seek(0)
+            _prev_cols_available = [str(c).strip() for c in _tmp.columns
+                                     if not (isinstance(c, float) and pd.isna(c)) and str(c).strip()]
+            if _prev_cols_available != S.prev_cols:
+                S.prev_cols = _prev_cols_available
+                S.prev_join_col = None; S.prev_amt_col = None
+        except Exception:
+            pass
+
+    _jidx = (_prev_cols_available.index(S.prev_join_col)
+              if S.prev_join_col in _prev_cols_available else 0)
+    S.prev_join_col = st.selectbox(
+        "Prev Year: Customer ID col",
+        _prev_cols_available if _prev_cols_available else ["— upload prev year file —"],
+        index=_jidx, key="sel_jc",
+        help="Column to join on — customer number or name that matches VLDS file")
+
+with cfg5:
+    _aidx = (_prev_cols_available.index(S.prev_amt_col)
+              if S.prev_amt_col in _prev_cols_available else 0)
+    S.prev_amt_col = st.selectbox(
+        "Prev Year: Sales Amount col",
+        _prev_cols_available if _prev_cols_available else ["— upload prev year file —"],
+        index=_aidx, key="sel_ac",
+        help="Column with previous year Q sales figures e.g. 'Final Amount Q4-24'")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ─── Action bar ────────────────────────────────────────────────────────────────
+req_keys  = ["vlds_main", "df_recd", "prev_year", "dealer_list"]
+all_ready = all(k in S.files for k in req_keys)
+
+qtr_lbl = f"{quarter_sel}-{str(year_sel)[-2:]}"   # e.g. Q4-25
+
+st.markdown('<div class="action-bar">', unsafe_allow_html=True)
+ab1, ab2, ab3, ab4, ab5 = st.columns([1.6, 1.3, 1.3, 1.3, 3], gap="small")
+
+with ab1:
+    run_btn = st.button(f"🚀 Run {qtr_lbl} Processing",
+                         type="primary", disabled=not all_ready,
+                         use_container_width=True)
+with ab2:
+    if S.result:
+        st.download_button(
+            "📥 Download Report",
+            data=S.result,
+            file_name=f"VLDS_{quarter_sel}_{year_sel}_Incentive_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+    else:
+        st.button("📥 Report", disabled=True, use_container_width=True)
+
+with ab3:
+    if S.log_txt:
+        st.download_button(
+            "📋 Download Log",
+            data=S.log_txt,
+            file_name=f"VLDS_{quarter_sel}_{year_sel}_ProcessLog.txt",
+            mime="text/plain",
+            use_container_width=True)
+    else:
+        st.button("📋 Log", disabled=True, use_container_width=True)
+
+with ab4:
+    if not all_ready:
+        missing_count = sum(1 for k,_,_,_,req in FILE_DEFS if req and k not in S.files)
+        st.markdown(
+            f'<div style="color:#F59E0B;font-size:.7rem;font-weight:700;'
+            f'padding:.3rem 0;">{missing_count} required file(s) missing</div>',
+            unsafe_allow_html=True)
+
+with ab5:
+    if S.result:
+        s = S.stats
+        st.markdown(
+            f'<div class="stats-bar">'
+            f'<div class="stat-item"><div class="stat-val" style="color:#60A5FA">'
+            f'{s.get("total",0):,}</div><div class="stat-lbl">Total Rows</div></div>'
+            f'<div class="stat-item"><div class="stat-val" style="color:#4ADE80">'
+            f'{s.get("eligible",0):,}</div><div class="stat-lbl">Eligible</div></div>'
+            f'<div class="stat-item"><div class="stat-val" style="color:#F87171">'
+            f'{s.get("excluded",0):,}</div><div class="stat-lbl">Excluded</div></div>'
+            f'<div class="stat-item"><div class="stat-val" style="color:#FBBF24">'
+            f'₹{s.get("sales_cr",0):,.1f} Cr</div><div class="stat-lbl">Eligible Sales</div></div>'
+            f'</div>',
+            unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ─── Processing ────────────────────────────────────────────────────────────────
+if run_btn:
+    S.result = None; S.logs = []; S.stats = {}; S.log_txt = ""
+    prog = st.progress(0, text="Starting …")
+    lbl  = st.empty()
+
+    def cb(pct, msg):
+        prog.progress(pct, text=msg)
+        lbl.markdown(f"<small>⚙️ {msg}</small>", unsafe_allow_html=True)
+
+    try:
+        excl = (parse_excl(S.files["excl_file"])
+                if "excl_file" in S.files else pd.DataFrame(DEFAULT_EXCL))
+        slab = (parse_slab(S.files["slab_file"])
+                if "slab_file" in S.files else pd.DataFrame(DEFAULT_SLABS))
+
+        proc = VLDSProcessor(excl, slab)
+        # Pass user-selected quarter & year to override filename detection
+        proc.stats["quarter"] = quarter_sel
+        proc.stats["year"]    = str(year_sel)
+
+        out, logs, stats = proc.run(
+            vlds_f        = S.files.get("vlds_main"),
+            dfrecd_f      = S.files.get("df_recd"),
+            prev_f        = S.files.get("prev_year"),
+            dealer_f      = S.files.get("dealer_list"),
+            prev_join_col = S.prev_join_col,
+            prev_amt_col  = S.prev_amt_col,
+            slab_type     = slab_type,
+            cb            = cb,
+        )
+        S.result = out; S.logs = logs; S.stats = stats
+
+        # Build log text for download
+        lines = [f"VLDS Processing Log — {quarter_sel} {year_sel}", "=" * 60]
+        for e in logs:
+            prefix = {"success": "[OK] ", "warning": "[WARN] ", "error": "[ERR] "}.get(e["lv"], "     ")
+            lines.append(prefix + str(e["msg"]))
+        S.log_txt = "\n".join(lines)
+
+        prog.progress(100, text="Done ✓")
+        lbl.success(f"✅ Processing complete — {stats.get('eligible',0):,} eligible rows")
+        st.rerun()
+
+    except Exception as e:
+        prog.empty(); lbl.empty()
+        st.error(f"❌ {e}")
+        with st.expander("Full error"):
+            st.code(traceback.format_exc())
+
+# ─── Log viewer (compact, collapsed by default after success) ──────────────────
+if S.logs:
+    err_ct  = sum(1 for e in S.logs if e["lv"] == "error")
+    warn_ct = sum(1 for e in S.logs if e["lv"] == "warning")
+    label   = f"📋 Processing Log"
+    if err_ct:   label += f" — ⛔ {err_ct} error(s)"
+    elif warn_ct: label += f" — ⚠ {warn_ct} warning(s)"
+
+    with st.expander(label, expanded=(not S.result or err_ct > 0)):
+        if err_ct or warn_ct:
+            issues = [e for e in S.logs if e["lv"] in ("warning","error")][:6]
+            for e in issues:
+                pfx = "⛔" if e["lv"] == "error" else "⚠️"
+                st.markdown(f"<small>{pfx} {str(e['msg'])[:220]}</small>",
+                            unsafe_allow_html=True)
+            st.markdown("<hr style='margin:.3rem 0'>", unsafe_allow_html=True)
+        html = ""
+        for e in S.logs:
+            msg = str(e["msg"]).replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
+            cls = {"success":"lo","warning":"lw","error":"le"}.get(e["lv"],"li")
+            html += f'<div class="{cls}">{msg}</div>\n'
+        st.markdown(f'<div class="logbox">{html}</div>', unsafe_allow_html=True)
