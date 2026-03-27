@@ -1480,3 +1480,151 @@ def parse_slab(f) -> pd.DataFrame:
 
     df = df.dropna(subset=["Growth Min(%)"]).reset_index(drop=True)
     return df[["Growth Min(%)","Growth Max(%)","Quarterly Payout(%)","Annual Payout(%)"]]
+
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INSTRUCTIONS: Open your utils.py and REPLACE your existing parse_excl()
+# and parse_slab() functions with the two functions below.
+# Do NOT import anything extra — these use only pandas which utils.py
+# already imports.
+# Also add _norm_key() if not already present in utils.py.
+# ─────────────────────────────────────────────────────────────────────────────
+import re
+import pandas as pd
+
+
+def _norm_key(v):
+    """
+    Normalise a cell value read from Excel for use as a lookup key.
+    Excel stores pure integers as floats, so str() gives "12345.0".
+    This strips the ".0": "12345.0" becomes "12345".
+    """
+    s = str(v).strip()
+    if re.match(r"^\d+\.0+$", s):
+        s = s.split(".")[0]
+    return s
+
+
+def parse_excl(f) -> "pd.DataFrame":
+    """
+    Read the Exclusion List file FULLY DYNAMICALLY.
+
+    Every non-blank row in the uploaded file becomes one exclusion rule.
+    The client can add, remove, or edit exclusions every quarter by
+    uploading their updated file — no code change required.
+
+    Column matching is by keyword (not exact name):
+      Particulars / Exclusion / Description  → text to match in VLDS
+      Item No / Item Number                  → optional item code (NA = skip)
+      Column / Match Column / Apply To       → which VLDS column to search
+    """
+    from utils import read_file  # local import — avoids circular import
+
+    if f is None:
+        return pd.DataFrame(columns=["Particulars", "Item No", "Column"])
+
+    df = read_file(f)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Particulars", "Item No", "Column"])
+
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).lower().strip()
+        if any(k in cl for k in ["particular", "exclusion", "description",
+                                  "exclude", "item name", "particulars"]):
+            if "Particulars" not in col_map.values():
+                col_map[c] = "Particulars"
+        elif any(k in cl for k in ["item no", "item number", "itemno", "item_no"]):
+            if "Item No" not in col_map.values():
+                col_map[c] = "Item No"
+        elif any(k in cl for k in ["column", "match", "apply", "field",
+                                    "search in", "where"]):
+            if "Column" not in col_map.values():
+                col_map[c] = "Column"
+
+    df = df.rename(columns=col_map)
+
+    for need, default in [("Particulars", ""), ("Item No", "NA"),
+                           ("Column", "Line Item")]:
+        if need not in df.columns:
+            df[need] = default
+
+    df["Particulars"] = df["Particulars"].fillna("").astype(str).str.strip()
+    df["Item No"]     = df["Item No"].fillna("NA").astype(str).str.strip()
+    df["Column"]      = df["Column"].fillna("Line Item").astype(str).str.strip()
+
+    # Remove rows with no text to match on
+    df = df[df["Particulars"] != ""].copy()
+
+    return df[["Particulars", "Item No", "Column"]].reset_index(drop=True)
+
+
+def parse_slab(f) -> "pd.DataFrame":
+    """
+    Read the Slab Table file FULLY DYNAMICALLY.
+
+    Every data row becomes one slab bracket. The client can change rates
+    or add/remove brackets each quarter by uploading their updated file.
+
+    Column matching is by keyword:
+      Growth Min(%) / Min / From   → lower bound (inclusive)
+      Growth Max(%) / Max / To     → upper bound (exclusive)
+      Quarterly Payout(%) / Q      → payout rate for quarterly mode
+      Annual Payout(%) / A         → payout rate for annual mode
+    """
+    from utils import read_file  # local import — avoids circular import
+
+    EMPTY = pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
+                                   "Quarterly Payout(%)", "Annual Payout(%)"])
+    if f is None:
+        return EMPTY
+
+    df = read_file(f)
+    if df is None or df.empty:
+        return EMPTY
+
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).lower().strip()
+        if "growth min" in cl or "growth_min" in cl:
+            if "Growth Min(%)" not in col_map.values():
+                col_map[c] = "Growth Min(%)"
+        elif "growth max" in cl or "growth_max" in cl:
+            if "Growth Max(%)" not in col_map.values():
+                col_map[c] = "Growth Max(%)"
+        elif any(k in cl for k in ["quarterly", "q payout", "q%", "qtr"]):
+            if "Quarterly Payout(%)" not in col_map.values():
+                col_map[c] = "Quarterly Payout(%)"
+        elif any(k in cl for k in ["annual", "a payout", "a%", "yearly"]):
+            if "Annual Payout(%)" not in col_map.values():
+                col_map[c] = "Annual Payout(%)"
+        elif any(k in cl for k in ["min", "from", "lower", "start"]):
+            if "Growth Min(%)" not in col_map.values():
+                col_map[c] = "Growth Min(%)"
+        elif any(k in cl for k in ["max", "to", "upper", "end"]):
+            if "Growth Max(%)" not in col_map.values():
+                col_map[c] = "Growth Max(%)"
+
+    df = df.rename(columns=col_map)
+
+    for col, default in [("Growth Min(%)", 0), ("Growth Max(%)", 9999),
+                          ("Quarterly Payout(%)", 0), ("Annual Payout(%)", 0)]:
+        if col not in df.columns:
+            df[col] = default
+
+    def _n(s, d=0.0):
+        return pd.to_numeric(
+            s.astype(str).str.replace(",", "", regex=False).str.strip(),
+            errors="coerce").fillna(d)
+
+    df["Growth Min(%)"]       = _n(df["Growth Min(%)"],       0.0)
+    df["Growth Max(%)"]       = _n(df["Growth Max(%)"],    9999.0)
+    df["Quarterly Payout(%)"] = _n(df["Quarterly Payout(%)"], 0.0)
+    df["Annual Payout(%)"]    = _n(df["Annual Payout(%)"],    0.0)
+
+    df = df.dropna(subset=["Growth Min(%)"]).reset_index(drop=True)
+    return df[["Growth Min(%)", "Growth Max(%)",
+               "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
