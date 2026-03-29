@@ -1,11 +1,8 @@
 # app.py | VLDS Pro v2 — Forest Dealerships
-# streamlit run app.py
 import streamlit as st
 import pandas as pd
-import traceback, base64, os
+import traceback, base64, os, re
 
-# config.py DEFAULT_EXCL/DEFAULT_SLABS intentionally not imported
-# Exclusion list and slab table MUST be uploaded — no hardcoded fallback
 from utils     import parse_excl, parse_slab, read_file
 from processor import VLDSProcessor
 
@@ -13,278 +10,272 @@ st.set_page_config(page_title="VLDS Pro v2 — Forest Dealerships",
                    page_icon="🏭", layout="wide",
                    initial_sidebar_state="collapsed")
 
-# ── LOGO ──────────────────────────────────────────────────────────────────────
-LOGO_PATH = ""   # ← PUT YOUR LOGO PATH HERE
+LOGO_PATH = ""
 
 def _logo_html():
     if LOGO_PATH and os.path.exists(LOGO_PATH):
-        ext  = LOGO_PATH.rsplit(".", 1)[-1].lower()
-        mime = {"png":"image/png","jpg":"image/jpeg",
-                "jpeg":"image/jpeg","svg":"image/svg+xml"}.get(ext, "image/png")
-        b64  = base64.b64encode(open(LOGO_PATH, "rb").read()).decode()
-        return f'<img src="data:{mime};base64,{b64}" style="height:32px;width:auto;">'
-    return '<span style="font-size:1.15rem;font-weight:900;color:#D97706;line-height:1;">FD</span>'
+        ext  = LOGO_PATH.rsplit(".",1)[-1].lower()
+        mime = {"png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","svg":"image/svg+xml"}.get(ext,"image/png")
+        b64  = base64.b64encode(open(LOGO_PATH,"rb").read()).decode()
+        return f'<img src="data:{mime};base64,{b64}" style="height:30px;width:auto;">'
+    return '<span style="font-size:1rem;font-weight:900;color:#D97706;">FD</span>'
 
-# ══════════════════════════════ CSS ═══════════════════════════════════════════
 st.markdown("""
 <style>
 *{box-sizing:border-box;}
-[data-testid="stAppViewContainer"]{background:#EDEEF2;}
-section.main>div{padding:.45rem .9rem .7rem!important;}
+[data-testid="stAppViewContainer"]{background:#F0F2F8;}
+section.main>div{padding:.5rem 1rem .8rem!important;}
 #MainMenu,footer,header{visibility:hidden;}
 [data-testid="stDecoration"]{display:none;}
-[data-testid="stVerticalBlock"]{gap:.18rem!important;}
-[data-testid="stHorizontalBlock"]{gap:.3rem!important;}
+[data-testid="stVerticalBlock"]{gap:.22rem!important;}
+[data-testid="stHorizontalBlock"]{gap:.4rem!important;}
 
-/* ─ topbar ───────────────────────────────────────────────── */
+/* ── TOPBAR ─────────────────────────────────────────────── */
 .topbar{
-  background:linear-gradient(135deg,#111827 60%,#1c2d45);
-  border-radius:9px;padding:.48rem .9rem;margin-bottom:.38rem;
+  background:linear-gradient(135deg,#0F172A 55%,#1E3A5F);
+  border-radius:10px;padding:.55rem 1rem;margin-bottom:.45rem;
   display:flex;align-items:center;justify-content:space-between;
-  box-shadow:0 2px 8px rgba(0,0,0,.18);
+  border:1px solid rgba(255,255,255,.06);
 }
-.topbar-left{display:flex;align-items:center;gap:.55rem;}
-.logo-box{
-  width:36px;height:36px;border-radius:7px;background:#fff;
-  display:flex;align-items:center;justify-content:center;
-  overflow:hidden;flex-shrink:0;
+.topbar-left{display:flex;align-items:center;gap:.6rem;}
+.logo-wrap{width:36px;height:36px;border-radius:8px;background:#fff;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.topbar-text .t1{color:#fff;font-size:.9rem;font-weight:800;line-height:1.25;}
+.topbar-text .t2{color:rgba(255,255,255,.35);font-size:.57rem;margin-top:2px;}
+.topbar-right{display:flex;gap:.35rem;align-items:center;}
+.pill{padding:3px 11px;border-radius:20px;font-size:.57rem;font-weight:700;
+  border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.85);
+  background:rgba(255,255,255,.07);}
+.pill-gold{background:rgba(217,119,6,.25);border-color:rgba(217,119,6,.5);color:#FCD34D;}
+
+/* ── SECTION LABEL ──────────────────────────────────────── */
+.slbl{font-size:.54rem;font-weight:800;letter-spacing:1px;
+  text-transform:uppercase;color:#64748B;margin:.2rem 0 .14rem;padding:0;}
+
+/* ── FILE CARD GRID ─────────────────────────────────────── */
+.fc-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.45rem;margin-bottom:.1rem;}
+
+.fc{
+  border-radius:9px;padding:.45rem .6rem .38rem;
+  display:flex;flex-direction:column;gap:.12rem;
+  border:1.5px solid;transition:all .15s;
 }
-.topbar-text .t1{color:#fff;font-size:.92rem;font-weight:800;line-height:1.2;}
-.topbar-text .t2{color:rgba(255,255,255,.38);font-size:.58rem;margin-top:1px;}
-.topbar-right{display:flex;gap:.3rem;align-items:center;}
-.pill{padding:2px 10px;border-radius:20px;font-size:.58rem;font-weight:700;
-  border:1px solid rgba(255,255,255,.15);color:#fff;
-  background:rgba(255,255,255,.08);white-space:nowrap;}
-.pill-amber{background:#92400E;border-color:#78350F;color:#FEF3C7;}
+/* colour variants per category */
+.fc-blue  {background:#EFF6FF;border-color:#BFDBFE;}
+.fc-indigo{background:#EEF2FF;border-color:#C7D2FE;}
+.fc-violet{background:#F5F3FF;border-color:#DDD6FE;}
+.fc-teal  {background:#F0FDFA;border-color:#99F6E4;}
+.fc-amber {background:#FFFBEB;border-color:#FDE68A;}
+.fc-rose  {background:#FFF1F2;border-color:#FECDD3;}
+.fc-slate {background:#F8FAFC;border-color:#E2E8F0;border-style:dashed;}
+.fc.ok    {border-style:solid!important;}
+.fc-blue.ok  {background:#DBEAFE;border-color:#3B82F6;}
+.fc-indigo.ok{background:#E0E7FF;border-color:#6366F1;}
+.fc-violet.ok{background:#EDE9FE;border-color:#8B5CF6;}
+.fc-teal.ok  {background:#CCFBF1;border-color:#14B8A6;}
+.fc-amber.ok {background:#FEF3C7;border-color:#F59E0B;}
+.fc-rose.ok  {background:#FFE4E6;border-color:#F43F5E;}
+.fc-slate.ok {background:#F1F5F9;border-color:#64748B;}
 
-/* ─ section label ────────────────────────────────────────── */
-.slbl{font-size:.56rem;font-weight:800;letter-spacing:.9px;
-  text-transform:uppercase;color:#6B7280;margin:.18rem 0 .12rem;padding:0;}
-
-/* ─ file cards ───────────────────────────────────────────── */
-.fc{background:#fff;border:1.5px solid #E2E8F0;border-radius:8px;
-  padding:.3rem .55rem .22rem;display:flex;flex-direction:column;gap:.08rem;
-  transition:border-color .2s,background .2s;min-height:48px;}
-.fc.ok{border-color:#16A34A;background:#F0FDF4;}
-.fc.opt{border-style:dashed;border-color:#CBD5E1;}
-.fc-top{display:flex;align-items:center;gap:.3rem;}
-.fc-ico{font-size:.82rem;flex-shrink:0;width:18px;text-align:center;line-height:1;}
-.fc-nm{font-size:.7rem;font-weight:700;color:#111827;
+.fc-top{display:flex;align-items:center;gap:.35rem;}
+.fc-ico{font-size:.85rem;flex-shrink:0;line-height:1;}
+.fc-nm{font-size:.67rem;font-weight:700;color:#1E293B;
   flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.fc-ds{font-size:.58rem;color:#94A3B8;line-height:1.25;padding-left:21px;margin-top:1px;}
-.tag{font-size:.52rem;font-weight:700;border-radius:3px;
-  padding:0px 5px;line-height:1.45;flex-shrink:0;}
-.tag-r{background:#FEE2E2;color:#B91C1C;}
-.tag-o{background:#D1FAE5;color:#065F46;}
-.tag-k{background:#DCFCE7;color:#14532D;}
-.fname{font-size:.56rem;color:#16A34A;font-weight:600;
-  padding-left:21px;margin-top:1px;white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis;}
+.tag{font-size:.5rem;font-weight:800;border-radius:4px;
+  padding:1px 5px;line-height:1.5;flex-shrink:0;letter-spacing:.3px;}
+.tag-req{background:#FEE2E2;color:#991B1B;}
+.tag-ok {background:#DCFCE7;color:#14532D;}
+.tag-opt{background:#F1F5F9;color:#475569;}
+.fc-fname{font-size:.57rem;font-weight:600;color:#059669;
+  margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
-/* ─ file uploader — show Browse button, hide drag/drop text ─ */
+/* ── FILE UPLOADER — Browse button only ─────────────────── */
 [data-testid="stFileUploader"]{margin:0!important;padding:0!important;}
 [data-testid="stFileUploader"]>div{padding:0!important;}
 [data-testid="stFileUploaderDropzoneInstructions"]{display:none!important;}
 [data-testid="stFileUploader"] small{display:none!important;}
 [data-testid="stFileUploaderDropzone"]{
-  min-height:32px!important;max-height:36px!important;
-  padding:.04rem .4rem!important;overflow:hidden!important;
-  background:#F8FAFC!important;border:1px solid #CBD5E1!important;
-  border-radius:6px!important;cursor:pointer!important;}
-[data-testid="stFileUploaderDropzone"]:hover{
-  background:#EFF6FF!important;border-color:#93C5FD!important;}
+  min-height:28px!important;max-height:30px!important;
+  padding:.03rem .3rem!important;overflow:hidden!important;
+  background:transparent!important;border:none!important;
+  border-radius:5px!important;cursor:pointer!important;}
 [data-testid="stFileUploaderDropzone"]>div{
   display:flex!important;align-items:center!important;
-  gap:.3rem!important;min-height:30px!important;}
+  min-height:26px!important;}
 [data-testid="stFileUploader"] button{
-  font-size:.6rem!important;padding:.05rem .55rem!important;
-  height:22px!important;min-height:0!important;line-height:1.4!important;
+  font-size:.58rem!important;padding:.04rem .5rem!important;
+  height:20px!important;min-height:0!important;line-height:1.35!important;
   border-radius:4px!important;white-space:nowrap!important;
-  background:#E5E7EB!important;color:#374151!important;
-  border:1px solid #D1D5DB!important;font-weight:600!important;}
-[data-testid="stFileUploader"] button:hover{background:#D1D5DB!important;}
+  background:rgba(255,255,255,.7)!important;color:#374151!important;
+  border:1px solid #CBD5E1!important;font-weight:700!important;
+  width:100%!important;}
+[data-testid="stFileUploader"] button:hover{background:#fff!important;}
 [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"]{
-  font-size:.58rem!important;padding:.04rem .3rem!important;
-  border-radius:4px!important;background:#F0FDF4!important;
-  border:1px solid #16A34A!important;color:#15803D!important;}
+  font-size:.55rem!important;padding:.02rem .25rem!important;
+  border-radius:3px!important;background:rgba(255,255,255,.8)!important;
+  border:1px solid #6EE7B7!important;color:#047857!important;}
 [data-testid="stFileUploader"] [data-testid="stFileUploaderDeleteBtn"]{
-  width:14px!important;height:14px!important;min-width:0!important;}
+  width:12px!important;height:12px!important;min-width:0!important;}
 
-/* ─ config panel ─────────────────────────────────────────── */
-.cfgbox{background:#fff;border:1px solid #E2E8F0;border-radius:8px;
-  padding:.38rem .7rem .3rem;box-shadow:0 1px 3px rgba(0,0,0,.06);}
-.cfgtitle{font-size:.58rem;font-weight:800;text-transform:uppercase;
-  letter-spacing:.6px;color:#475569;margin-bottom:.22rem;}
+/* ── CONFIG BOX ─────────────────────────────────────────── */
+.cfgbox{background:#fff;border:1px solid #E2E8F0;border-radius:9px;
+  padding:.4rem .8rem .35rem;margin:.1rem 0;}
+.cfgtitle{font-size:.54rem;font-weight:800;text-transform:uppercase;
+  letter-spacing:.8px;color:#64748B;margin-bottom:.2rem;}
 
-/* ─ widget tighten ───────────────────────────────────────── */
+/* ── WIDGET TIGHTEN ─────────────────────────────────────── */
 [data-testid="stSelectbox"]{margin:0!important;}
-[data-testid="stSelectbox"] label{font-size:.62rem!important;font-weight:600!important;
-  color:#374151!important;margin-bottom:.06rem!important;}
+[data-testid="stSelectbox"] label{font-size:.6rem!important;font-weight:700!important;
+  color:#374151!important;margin-bottom:.04rem!important;}
 [data-testid="stSelectbox"] [data-baseweb="select"]>div{
-  min-height:26px!important;font-size:.68rem!important;}
+  min-height:28px!important;font-size:.67rem!important;}
 [data-testid="stTextInput"]{margin:0!important;}
-[data-testid="stTextInput"] label{font-size:.62rem!important;font-weight:600!important;
-  color:#374151!important;margin-bottom:.06rem!important;}
+[data-testid="stTextInput"] label{font-size:.6rem!important;font-weight:700!important;
+  color:#374151!important;margin-bottom:.04rem!important;}
 [data-testid="stTextInput"] input{
-  min-height:26px!important;font-size:.68rem!important;padding:.2rem .4rem!important;}
+  min-height:28px!important;font-size:.67rem!important;padding:.18rem .4rem!important;}
 [data-testid="stRadio"]{margin:0!important;}
-[data-testid="stRadio"]>label{font-size:.62rem!important;font-weight:600!important;}
-[data-testid="stRadio"]>div{gap:.25rem!important;margin-top:.06rem!important;}
+[data-testid="stRadio"]>label{font-size:.6rem!important;font-weight:700!important;color:#374151!important;}
+[data-testid="stRadio"]>div{gap:.3rem!important;margin-top:.05rem!important;}
 [data-testid="stRadio"] label span p,
-[data-testid="stRadio"] label span{font-size:.66rem!important;}
+[data-testid="stRadio"] label span{font-size:.65rem!important;}
 
-/* ─ action bar ───────────────────────────────────────────── */
-.actbar{background:linear-gradient(135deg,#111827 60%,#1c2d45);
-  border-radius:8px;padding:.38rem .7rem;
-  display:flex;align-items:center;gap:.35rem;
-  box-shadow:0 2px 6px rgba(0,0,0,.15);}
-
-/* ─ primary button ───────────────────────────────────────── */
+/* ── ACTION BAR ─────────────────────────────────────────── */
+.actbar{
+  background:linear-gradient(135deg,#0F172A 55%,#1E3A5F);
+  border-radius:9px;padding:.4rem .85rem;
+  display:flex;align-items:center;gap:.4rem;
+  border:1px solid rgba(255,255,255,.06);
+}
 div[data-testid="stButton"]>button[kind="primary"]{
   background:linear-gradient(135deg,#D97706,#B45309)!important;
-  color:#fff!important;border:none!important;border-radius:6px!important;
-  font-weight:800!important;font-size:.72rem!important;
-  padding:.3rem .85rem!important;width:100%!important;
-  box-shadow:0 2px 6px rgba(217,119,6,.45)!important;white-space:nowrap!important;}
+  color:#fff!important;border:none!important;border-radius:7px!important;
+  font-weight:800!important;font-size:.7rem!important;
+  padding:.32rem .9rem!important;width:100%!important;
+  letter-spacing:.2px;}
 div[data-testid="stButton"]>button[kind="primary"]:hover{
   background:linear-gradient(135deg,#B45309,#92400E)!important;}
-div[data-testid="stButton"]>button:disabled{opacity:.3!important;}
-
-/* ─ download buttons ─────────────────────────────────────── */
+div[data-testid="stButton"]>button:disabled{opacity:.25!important;}
 div[data-testid="stDownloadButton"]>button{
-  background:linear-gradient(135deg,#16A34A,#15803D)!important;
-  color:#fff!important;border:none!important;border-radius:6px!important;
-  font-weight:700!important;font-size:.66rem!important;
-  padding:.26rem .65rem!important;width:100%!important;
-  box-shadow:0 1px 4px rgba(22,163,74,.4)!important;white-space:nowrap!important;}
+  background:linear-gradient(135deg,#059669,#047857)!important;
+  color:#fff!important;border:none!important;border-radius:7px!important;
+  font-weight:700!important;font-size:.64rem!important;
+  padding:.28rem .65rem!important;width:100%!important;}
 div[data-testid="stDownloadButton"]>button:hover{
-  background:linear-gradient(135deg,#15803D,#14532D)!important;}
-
-/* ─ secondary/disabled buttons ───────────────────────────── */
+  background:linear-gradient(135deg,#047857,#065F46)!important;}
 div[data-testid="stButton"]>button:not([kind="primary"]){
-  border-radius:6px!important;font-size:.66rem!important;
-  padding:.26rem .65rem!important;width:100%!important;opacity:.45!important;}
+  border-radius:7px!important;font-size:.64rem!important;
+  padding:.28rem .65rem!important;width:100%!important;opacity:.35!important;}
 
-/* ─ stats ────────────────────────────────────────────────── */
-.stats{display:flex;gap:1.1rem;align-items:center;}
-.stat .sv{font-size:.95rem;font-weight:900;line-height:1;}
-.stat .sl{font-size:.52rem;color:rgba(255,255,255,.4);margin-top:1px;}
+/* ── STATS ───────────────────────────────────────────────── */
+.stats{display:flex;gap:1.4rem;align-items:center;}
+.stat .sv{font-size:1rem;font-weight:900;line-height:1;}
+.stat .sl{font-size:.5rem;color:rgba(255,255,255,.38);margin-top:2px;letter-spacing:.3px;}
 
-/* ─ misc ─────────────────────────────────────────────────── */
-[data-testid="stProgress"]{margin:.08rem 0!important;}
-div.stAlert{padding:.22rem .45rem!important;font-size:.68rem!important;}
+/* ── MISC ────────────────────────────────────────────────── */
+[data-testid="stProgress"]{margin:.06rem 0!important;}
+div.stAlert{padding:.22rem .5rem!important;font-size:.67rem!important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session state ──────────────────────────────────────────────────────────────
-for k, v in {
-    "files": {}, "result": None, "logs": [], "stats": {},
-    "prev_join_col": None, "prev_amt_col": None,
-    "prev_cols": [], "log_txt": "",
-    "year_custom": "",
+# ── Session state ──────────────────────────────────────────
+for k,v in {
+    "files":{},"result":None,"logs":[],"stats":{},
+    "prev_join_col":None,"prev_amt_col":None,
+    "prev_cols":[],"log_txt":"","year_custom":"",
 }.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+    if k not in st.session_state: st.session_state[k]=v
 S = st.session_state
 
-# ── TOPBAR ────────────────────────────────────────────────────────────────────
+# ── TOPBAR ─────────────────────────────────────────────────
 st.markdown(f"""
 <div class="topbar">
   <div class="topbar-left">
-    <div class="logo-box">{_logo_html()}</div>
+    <div class="logo-wrap">{_logo_html()}</div>
     <div class="topbar-text">
       <div class="t1">VLDS Incentive Processor</div>
-      <div class="t2">Forest Dealerships · 4S Dealer Eligibility &amp; Quarterly Payout Report</div>
+      <div class="t2">Forest Dealerships &nbsp;·&nbsp; 4S Dealer Eligibility &amp; Quarterly Payout Report</div>
     </div>
   </div>
   <div class="topbar-right">
     <span class="pill">VLDS Pro v2</span>
-    <span class="pill pill-amber">Forest Dealerships</span>
+    <span class="pill pill-gold">Forest Dealerships</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── FILE DEFS ─────────────────────────────────────────────────────────────────
+# ── FILE DEFINITIONS ───────────────────────────────────────
+# (key, icon, label, color-class, required)
 FILE_DEFS = [
-    ("vlds_main",   "📊", "VLDS Main File",        "Current quarter VLDS sales export",          True),
-    ("df_recd",     "🔗", "DF & RECD File",         "Current quarter DF/RECD transactions",       True),
-    ("prev_year",   "📅", "Previous Year Summary",  "Prior year final incentive summary",         True),
-    ("dealer_list", "🏪", "4S Dealer List",         "Authorised dealers (Dealer No column)",      True),
-    ("excl_file",   "📋", "Exclusion List",         "Upload every quarter — rules may change",     True),
-    ("slab_file",   "📈", "Slab Table",             "Upload every quarter — rates may change",     True),
-    ("base_data",   "🗂️", "Base Data",              "Reference base data (optional)",             False),
+    ("vlds_main",   "📊", "VLDS Main File",       "fc-blue",   True),
+    ("df_recd",     "🔗", "DF & RECD File",        "fc-indigo", True),
+    ("prev_year",   "📅", "Previous Year Summary", "fc-violet", True),
+    ("dealer_list", "🏪", "4S Dealer List",        "fc-teal",   True),
+    ("excl_file",   "📋", "Exclusion List",        "fc-amber",  True),
+    ("slab_file",   "📈", "Slab Table",            "fc-rose",   True),
+    ("base_data",   "🗂️", "Base Data",             "fc-slate",  False),
 ]
 
-# ── FILE UPLOAD SECTION ───────────────────────────────────────────────────────
+# ── INPUT FILES — 3-3-1 grid ───────────────────────────────
 st.markdown('<p class="slbl">📂 Input Files</p>', unsafe_allow_html=True)
 
-for key, icon, name, desc, req in FILE_DEFS:
-    loaded  = key in S.files
-    fname   = S.files[key].name if loaded else ""
-    tag_cls = "tag-k" if loaded else ("tag-r" if req else "tag-o")
-    tag_txt = "✓" if loaded else ("REQ" if req else "OPT")
-    fc_cls  = "fc ok" if loaded else ("fc opt" if not req else "fc")
+# Build rows: row1 = files 0-2, row2 = files 3-5, row3 = file 6
+rows = [FILE_DEFS[0:3], FILE_DEFS[3:6], FILE_DEFS[6:7]]
 
-    cl, cr = st.columns([4, 3], gap="small")
-    with cl:
-        st.markdown(
-            f'<div class="{fc_cls}">'
-            f'<div class="fc-top">'
-            f'<span class="fc-ico">{icon}</span>'
-            f'<span class="fc-nm">{name}</span>'
-            f'<span class="tag {tag_cls}">{tag_txt}</span>'
-            f'</div>'
-            f'<div class="fc-ds">{desc}</div>'
-            + (f'<div class="fname">· {fname[:40]}</div>' if loaded else '')
-            + '</div>',
+for row in rows:
+    n = len(row)
+    cols = st.columns(n, gap="small")
+    for ci, (key, icon, label, color, req) in enumerate(row):
+        loaded = key in S.files
+        tag_cls = "tag-ok" if loaded else ("tag-req" if req else "tag-opt")
+        tag_txt = "✓ Loaded" if loaded else ("Required" if req else "Optional")
+        fc_cls  = f"fc {color}" + (" ok" if loaded else "")
+        fname   = S.files[key].name if loaded else ""
+
+        with cols[ci]:
+            st.markdown(
+                f'<div class="{fc_cls}">'
+                f'<div class="fc-top">'
+                f'<span class="fc-ico">{icon}</span>'
+                f'<span class="fc-nm">{label}</span>'
+                f'<span class="tag {tag_cls}">{tag_txt}</span>'
+                f'</div>'
+                + (f'<div class="fc-fname">✓ {fname[:38]}</div>' if loaded else '')
+                + '</div>',
+                unsafe_allow_html=True)
+            up = st.file_uploader("_", type=["xlsx","xls","csv"],
+                                   key=f"fu_{key}", label_visibility="collapsed")
+            if up:
+                if up.size > 209_715_200: st.error("File exceeds 200 MB limit")
+                else: S.files[key] = up; st.toast(f"✅ {up.name} loaded")
+
+# ── CONFIGURATION ──────────────────────────────────────────
+st.markdown('<p class="slbl" style="margin-top:.3rem;">⚙️ Report Configuration</p>',
             unsafe_allow_html=True)
-    with cr:
-        up = st.file_uploader(
-            "_", type=["xlsx", "xls", "csv"],
-            key=f"fu_{key}", label_visibility="collapsed")
-        if up:
-            if up.size > 209_715_200:
-                st.error("Exceeds 200 MB")
-            else:
-                S.files[key] = up
-                st.toast(f"✅ {up.name}")
-
-# ── CONFIGURATION ─────────────────────────────────────────────────────────────
-st.markdown('<p class="slbl" style="margin-top:.25rem;">⚙️ Configuration</p>',
-            unsafe_allow_html=True)
-st.markdown('<div class="cfgbox"><div class="cfgtitle">Report Settings &amp; Prev Year Column Mapping</div>',
+st.markdown('<div class="cfgbox"><div class="cfgtitle">Quarter · Year · Payout Mode · Previous Year Column Mapping</div>',
             unsafe_allow_html=True)
 
-cc = st.columns([.55, .85, .85, 1.05, 1.9, 1.9], gap="small")
+cc = st.columns([.5,.6,.65,.9,1.75,1.75], gap="small")
 
-with cc[0]:
-    quarter_sel = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4"], index=3, key="sel_q")
+with cc[0]: quarter_sel = st.selectbox("Quarter",["Q1","Q2","Q3","Q4"],index=3,key="sel_q")
 
 with cc[1]:
-    # Year: dropdown (common years) + free-text override
-    year_options = list(range(2022, 2032))
-    year_drop = st.selectbox("Year", year_options, index=3, key="sel_y_drop",
-                             help="Select from list or type a custom year below")
+    year_options = list(range(2022,2033))
+    year_drop = st.selectbox("Year", year_options, index=3, key="sel_y_drop")
 
 with cc[2]:
-    # Free-text year override — if filled, overrides the dropdown
     year_custom = st.text_input("Custom Year", value=S.year_custom,
                                 placeholder="e.g. 2026", key="sel_y_custom",
-                                help="Type any year here to override the dropdown")
+                                help="Type any year to override dropdown")
     S.year_custom = year_custom.strip()
 
-# Resolve final year: custom text wins if it looks like a valid year
-if S.year_custom and re.match(r"^20\d{2}$", S.year_custom):
-    year_sel = int(S.year_custom)
-else:
-    year_sel = year_drop
+year_sel = (int(S.year_custom)
+            if S.year_custom and re.match(r"^20\d{2}$", S.year_custom)
+            else year_drop)
 
-with cc[3]:
-    slab_type = st.radio("Payout", ["Quarterly","Annual"],
-                         horizontal=True, index=0, key="slab_r")
+with cc[3]: slab_type = st.radio("Payout",["Quarterly","Annual"],horizontal=True,index=0,key="slab_r")
 
-# ── Prev year column detection ─────────────────────────────────────────────────
-import re as _re
+# ── Prev year column detection ─────────────────────────────
 _pca = []
 if "prev_year" in S.files:
     try:
@@ -296,63 +287,55 @@ if "prev_year" in S.files:
             _raw = pd.read_excel(_pf, header=None, nrows=15, dtype=str)
             _br, _bs = 0, 0
             for _i, _row in _raw.iterrows():
-                _sc = sum(1 for v in _row if pd.notna(v) and len(str(v).strip()) > 1)
-                if _sc > _bs: _bs, _br = _sc, _i
+                _sc = sum(1 for v in _row if pd.notna(v) and len(str(v).strip())>1)
+                if _sc>_bs: _bs,_br=_sc,_i
             _pf.seek(0)
             _t = pd.read_excel(_pf, header=int(_br), nrows=3, dtype=str)
         _pf.seek(0)
         _pca = [str(c).strip() for c in _t.columns
-                if not (isinstance(c, float) and pd.isna(c)) and str(c).strip()]
+                if not(isinstance(c,float) and pd.isna(c)) and str(c).strip()]
         if _pca != S.prev_cols:
-            S.prev_cols = _pca; S.prev_join_col = None; S.prev_amt_col = None
-    except Exception:
-        pass
+            S.prev_cols=_pca; S.prev_join_col=None; S.prev_amt_col=None
+    except Exception: pass
 
 _none = ["— upload Previous Year file first —"]
 with cc[4]:
     _ji = _pca.index(S.prev_join_col) if S.prev_join_col in _pca else 0
-    S.prev_join_col = st.selectbox(
-        "Prev Year → Customer ID column",
+    S.prev_join_col = st.selectbox("Prev Year → Customer ID col",
         _pca if _pca else _none, index=_ji, key="sel_jc",
-        help="Column in previous year file that matches Customer Number in VLDS.")
+        help="Must match Customer Number in VLDS file exactly.")
 with cc[5]:
     _ai = _pca.index(S.prev_amt_col) if S.prev_amt_col in _pca else 0
-    S.prev_amt_col = st.selectbox(
-        "Prev Year → Sales Amount column",
+    S.prev_amt_col = st.selectbox("Prev Year → Sales Amount col",
         _pca if _pca else _none, index=_ai, key="sel_ac",
-        help="e.g. 'Final Amount Q4-24' — the quarterly sales figure column.")
+        help="e.g. 'Final Amount Q4-24'")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── ACTION BAR ────────────────────────────────────────────────────────────────
-req_keys  = ["vlds_main", "df_recd", "prev_year", "dealer_list", "excl_file", "slab_file"]
+# ── ACTION BAR ─────────────────────────────────────────────
+req_keys  = ["vlds_main","df_recd","prev_year","dealer_list","excl_file","slab_file"]
 all_ready = all(k in S.files for k in req_keys)
 qtr_lbl   = f"{quarter_sel}-{str(year_sel)[-2:]}"
 
 st.markdown('<div class="actbar">', unsafe_allow_html=True)
-ac = st.columns([1.2, 1.1, 1.1, .02, 3.5], gap="small")
+ac = st.columns([1.15,1.05,1.05,.02,3.7], gap="small")
 
 with ac[0]:
     run_btn = st.button(f"🚀 Run {qtr_lbl}", type="primary",
                         disabled=not all_ready, use_container_width=True)
 with ac[1]:
     if S.result:
-        st.download_button(
-            "📥 Download Report", data=S.result,
+        st.download_button("📥 Download Report", data=S.result,
             file_name=f"VLDS_{quarter_sel}_{year_sel}_Report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True)
-    else:
-        st.button("📥 Report", disabled=True, use_container_width=True)
+    else: st.button("📥 Report", disabled=True, use_container_width=True)
 with ac[2]:
-    # Log download always available in action bar — no expander below
     if S.log_txt:
-        st.download_button(
-            "📋 Download Log", data=S.log_txt,
+        st.download_button("📋 Download Log", data=S.log_txt,
             file_name=f"VLDS_{quarter_sel}_{year_sel}_Log.txt",
             mime="text/plain", use_container_width=True)
-    else:
-        st.button("📋 Log", disabled=True, use_container_width=True)
+    else: st.button("📋 Log", disabled=True, use_container_width=True)
 
 with ac[4]:
     if S.result:
@@ -360,47 +343,36 @@ with ac[4]:
         st.markdown(
             f'<div class="stats">'
             f'<div class="stat"><div class="sv" style="color:#60A5FA">{s.get("total",0):,}</div>'
-            f'<div class="sl">Total Rows</div></div>'
-            f'<div class="stat"><div class="sv" style="color:#4ADE80">{s.get("eligible",0):,}</div>'
-            f'<div class="sl">Eligible</div></div>'
+            f'<div class="sl">TOTAL ROWS</div></div>'
+            f'<div class="stat"><div class="sv" style="color:#34D399">{s.get("eligible",0):,}</div>'
+            f'<div class="sl">ELIGIBLE</div></div>'
             f'<div class="stat"><div class="sv" style="color:#F87171">{s.get("excluded",0):,}</div>'
-            f'<div class="sl">Excluded</div></div>'
-            f'<div class="stat"><div class="sv" style="color:#FBBF24">₹{s.get("sales_cr",0):,.1f} Cr</div>'
-            f'<div class="sl">Eligible Sales</div></div>'
+            f'<div class="sl">EXCLUDED</div></div>'
+            f'<div class="stat"><div class="sv" style="color:#FCD34D">₹{s.get("sales_cr",0):,.1f} Cr</div>'
+            f'<div class="sl">ELIGIBLE SALES</div></div>'
             f'</div>', unsafe_allow_html=True)
     elif not all_ready:
-        missing = [n for k, _, n, _d, r in FILE_DEFS if r and k not in S.files]
+        missing = [n for k,_,n,_c,r in FILE_DEFS if r and k not in S.files]
         st.markdown(
-            f'<div style="color:#FCD34D;font-size:.64rem;font-weight:600;">'
-            f'Waiting: {" · ".join(missing)}</div>', unsafe_allow_html=True)
+            f'<div style="color:#FCD34D;font-size:.63rem;font-weight:600;">'
+            f'Awaiting: {" · ".join(missing)}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(
-            '<div style="color:rgba(255,255,255,.3);font-size:.64rem;">'
-            'All files ready — click Run</div>', unsafe_allow_html=True)
+        st.markdown('<div style="color:rgba(255,255,255,.3);font-size:.63rem;">'
+                    'All files ready — click Run to process</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PROCESSING ────────────────────────────────────────────────────────────────
+# ── PROCESSING ─────────────────────────────────────────────
 if run_btn:
-    S.result = None; S.logs = []; S.stats = {}; S.log_txt = ""
+    S.result=None; S.logs=[]; S.stats={}; S.log_txt=""
     prog = st.progress(0, text="Starting …")
     lbl  = st.empty()
 
     def cb(pct, msg):
         prog.progress(pct, text=msg)
-        lbl.markdown(
-            f'<div style="font-size:.65rem;color:#6B7280;margin:.05rem 0;">⚙️ {msg}</div>',
-            unsafe_allow_html=True)
+        lbl.markdown(f'<div style="font-size:.63rem;color:#64748B;margin:.04rem 0;">⚙️ {msg}</div>',
+                     unsafe_allow_html=True)
     try:
-        # ── Exclusion list and Slab table: ALWAYS from uploaded files ──────────
-        # No hardcoded fallback. The client uploads their current quarter's
-        # files so the rules and rates are always correct for that quarter.
-        if "excl_file" not in S.files:
-            raise ValueError("Exclusion List file not uploaded. "
-                             "Please upload your current quarter exclusion file.")
-        if "slab_file" not in S.files:
-            raise ValueError("Slab Table file not uploaded. "
-                             "Please upload your current quarter slab file.")
         excl = parse_excl(S.files["excl_file"])
         slab = parse_slab(S.files["slab_file"])
 
@@ -419,36 +391,31 @@ if run_btn:
             prev_join_col=jc, prev_amt_col=ac_val,
             slab_type=slab_type, cb=cb)
 
-        S.result = out; S.logs = logs; S.stats = stats
-        lines = [f"VLDS Processing Log — {quarter_sel} {year_sel}", "=" * 60]
+        S.result=out; S.logs=logs; S.stats=stats
+        lines=[f"VLDS Processing Log — {quarter_sel} {year_sel}","="*60]
         for e in logs:
-            pfx = {"success":"[OK]   ","warning":"[WARN] ","error":"[ERR]  "}.get(
-                e["lv"], "       ")
-            lines.append(pfx + str(e["msg"]))
-        S.log_txt = "\n".join(lines)
+            pfx={"success":"[OK]   ","warning":"[WARN] ","error":"[ERR]  "}.get(e["lv"],"       ")
+            lines.append(pfx+str(e["msg"]))
+        S.log_txt="\n".join(lines)
         prog.progress(100, text="Done ✓")
-        lbl.success(
-            f"✅ Done — {stats.get('eligible',0):,} eligible rows | "
-            f"₹{stats.get('sales_cr',0):,.1f} Cr")
+        lbl.success(f"✅ Done — {stats.get('eligible',0):,} eligible rows | ₹{stats.get('sales_cr',0):,.1f} Cr")
         st.rerun()
 
     except Exception as e:
         prog.empty(); lbl.empty()
         st.error(f"❌ {e}")
-        with st.expander("Full traceback"):
-            st.code(traceback.format_exc())
+        with st.expander("Full traceback"): st.code(traceback.format_exc())
 
-# ── ERROR SUMMARY (only show if errors, no full log expander) ─────────────────
+# ── POST-RUN: show errors/warnings only (no log expander) ──
 if S.logs:
-    ec = sum(1 for e in S.logs if e["lv"] == "error")
-    wc = sum(1 for e in S.logs if e["lv"] == "warning")
+    ec = sum(1 for e in S.logs if e["lv"]=="error")
+    wc = sum(1 for e in S.logs if e["lv"]=="warning")
     if ec:
-        st.error(f"⛔ {ec} error(s) during processing — download the log for details.")
-        for e in [x for x in S.logs if x["lv"] == "error"][:4]:
-            st.markdown(f'<small>⛔ {str(e["msg"])[:280]}</small>',
-                        unsafe_allow_html=True)
+        st.error(f"⛔ {ec} error(s) during processing — download the log for full details.")
+        for e in [x for x in S.logs if x["lv"]=="error"][:3]:
+            st.markdown(f'<small>⛔ {str(e["msg"])[:260]}</small>', unsafe_allow_html=True)
     elif wc:
-        st.warning(f"⚠️ {wc} warning(s) — download the log for details.")
+        st.warning(f"⚠️ {wc} warning(s) — download the log for full details.")
 
 
 
@@ -457,292 +424,11 @@ if S.logs:
 
 
 
-# utils.py | VLDS Pro v2 — Forest Dealerships
-import re
-import pandas as pd
-import numpy as np
-
-
-# ── Key normaliser ────────────────────────────────────────────────────────────
-# Excel reads pure integers as floats → str gives "12345.0".
-# _norm_key strips ".0" so cross-file joins always work.
-def _norm_key(v):
-    s = str(v).strip()
-    if re.match(r"^\d+\.0+$", s):
-        s = s.split(".")[0]
-    return s
-
-
-# ── Column finder ─────────────────────────────────────────────────────────────
-def fcol(columns, *hints):
-    """Return the first column name whose lowercase contains any hint."""
-    for h in hints:
-        for c in columns:
-            if h.lower() in str(c).lower():
-                return c
-    return None
-
-
-# ── Normalised string series ──────────────────────────────────────────────────
-def N(s):
-    """Fillna + astype str + strip + upper — for consistent matching."""
-    return s.fillna("").astype(str).str.strip().str.upper()
-
-
-# ── Numeric conversion ────────────────────────────────────────────────────────
-def to_num(s):
-    """Series → float64: strip commas, coerce, NaN→0."""
-    return pd.to_numeric(
-        s.astype(str).str.replace(",", "", regex=False).str.strip(),
-        errors="coerce").fillna(0.0)
-
-
-def safe_num(v):
-    """Single value → float, 0.0 on failure."""
-    try:
-        f = float(str(v).replace(",", "").strip())
-        return 0.0 if (pd.isna(f) or np.isinf(f)) else f
-    except Exception:
-        return 0.0
-
-
-# ── Quarter / year from filename ──────────────────────────────────────────────
-def quarter_from_filename(name):
-    m = re.search(r"Q([1-4])", str(name), re.IGNORECASE)
-    return f"Q{m.group(1).upper()}" if m else "Q4"
-
-
-def year_from_filename(name):
-    m = re.search(r"(20\d{2})", str(name))
-    return m.group(1) if m else str(pd.Timestamp.now().year)
-
-
-# ── Smart file reader ─────────────────────────────────────────────────────────
-def read_file(f, sheet_hints=None):
-    """
-    Read an uploaded Excel or CSV file into a clean DataFrame.
-    Handles:
-      - CSV files
-      - Excel files with the data starting anywhere in rows 0-15
-      - Multiple sheets (picks best by row count or sheet_hints)
-    Returns None on failure.
-    """
-    if f is None:
-        return None
-    try:
-        f.seek(0)
-        name = str(getattr(f, "name", "")).lower()
-
-        if name.endswith(".csv"):
-            # Try common encodings
-            for enc in ["utf-8", "latin-1", "cp1252"]:
-                try:
-                    f.seek(0)
-                    df = pd.read_csv(f, dtype=str, encoding=enc)
-                    df.columns = [str(c).strip() for c in df.columns]
-                    return _clean_df(df)
-                except Exception:
-                    continue
-            return None
-
-        # Excel — find best sheet
-        f.seek(0)
-        xl = pd.ExcelFile(f)
-        sheet_names = xl.sheet_names
-
-        # Pick sheet by hints if provided
-        chosen = None
-        if sheet_hints:
-            for hint in sheet_hints:
-                for s in sheet_names:
-                    if hint.lower() in s.lower():
-                        chosen = s
-                        break
-                if chosen:
-                    break
-
-        if not chosen:
-            # Pick sheet with most rows
-            best_n, best_s = -1, sheet_names[0]
-            for s in sheet_names:
-                try:
-                    f.seek(0)
-                    tmp = pd.read_excel(f, sheet_name=s, header=None,
-                                        nrows=5000, dtype=str)
-                    if len(tmp) > best_n:
-                        best_n, best_s = len(tmp), s
-                except Exception:
-                    pass
-            chosen = best_s
-
-        f.seek(0)
-        raw = pd.read_excel(f, sheet_name=chosen, header=None,
-                            nrows=5000, dtype=str)
-
-        # Find header row: row with most non-blank cells
-        best_row, best_score = 0, 0
-        for i, row in raw.iterrows():
-            if i > 15:
-                break
-            score = sum(1 for v in row
-                        if pd.notna(v) and len(str(v).strip()) > 1)
-            if score > best_score:
-                best_score, best_row = score, i
-
-        f.seek(0)
-        df = pd.read_excel(f, sheet_name=chosen, header=int(best_row), dtype=str)
-        df.columns = [str(c).strip() for c in df.columns]
-        return _clean_df(df)
-
-    except Exception:
-        return None
-
-
-def _clean_df(df):
-    """Drop unnamed / fully-blank columns and fully-blank rows."""
-    # Drop columns that are entirely NaN
-    df = df.dropna(axis=1, how="all")
-    # Drop rows that are entirely NaN
-    df = df.dropna(axis=0, how="all")
-    # Rename duplicate column names
-    seen = {}
-    new_cols = []
-    for c in df.columns:
-        if c in seen:
-            seen[c] += 1
-            new_cols.append(f"{c}.{seen[c]}")
-        else:
-            seen[c] = 0
-            new_cols.append(c)
-    df.columns = new_cols
-    df = df.reset_index(drop=True)
-    return df
-
-
-# ── Dynamic exclusion list reader ─────────────────────────────────────────────
-# Reads EVERY row from the uploaded file — fully dynamic, no hardcoded list.
-# The client can add/remove/edit exclusions each quarter just by uploading
-# their updated file. Column matching is by keyword, not exact name.
-def parse_excl(f) -> pd.DataFrame:
-    """
-    Read the Exclusion List file dynamically.
-
-    Accepted column names (matched by keyword):
-      Particulars / Exclusion / Description → text to match in the VLDS
-      Item No / Item Number                 → optional item code (NA = skip)
-      Column / Match Column / Apply To      → which VLDS column to search
-                                              (default: Line Item)
-    """
-    if f is None:
-        return pd.DataFrame(columns=["Particulars", "Item No", "Column"])
-
-    f.seek(0)
-    df = read_file(f)
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["Particulars", "Item No", "Column"])
-
-    col_map = {}
-    for c in df.columns:
-        cl = str(c).lower().strip()
-        if any(k in cl for k in ["particular", "exclusion", "description",
-                                  "exclude", "item name"]):
-            if "Particulars" not in col_map.values():
-                col_map[c] = "Particulars"
-        elif any(k in cl for k in ["item no", "item number", "itemno", "item_no"]):
-            if "Item No" not in col_map.values():
-                col_map[c] = "Item No"
-        elif any(k in cl for k in ["column", "match", "apply", "field",
-                                    "search in", "where"]):
-            if "Column" not in col_map.values():
-                col_map[c] = "Column"
-
-    df = df.rename(columns=col_map)
-
-    for need, default in [("Particulars", ""), ("Item No", "NA"),
-                           ("Column", "Line Item")]:
-        if need not in df.columns:
-            df[need] = default
-
-    df["Particulars"] = df["Particulars"].fillna("").astype(str).str.strip()
-    df["Item No"]     = df["Item No"].fillna("NA").astype(str).str.strip()
-    df["Column"]      = df["Column"].fillna("Line Item").astype(str).str.strip()
-
-    df = df[df["Particulars"] != ""].copy()
-    return df[["Particulars", "Item No", "Column"]].reset_index(drop=True)
-
-
-# ── Dynamic slab table reader ─────────────────────────────────────────────────
-# Reads every bracket from the uploaded file — fully dynamic.
-# The client can change rates or add/remove brackets each quarter.
-def parse_slab(f) -> pd.DataFrame:
-    """
-    Read the Slab Table file dynamically.
-
-    Accepted column names (matched by keyword):
-      Growth Min(%) / Min / From   → lower bound (inclusive)
-      Growth Max(%) / Max / To     → upper bound (exclusive)
-      Quarterly Payout(%) / Q      → payout for quarterly mode
-      Annual Payout(%) / A         → payout for annual mode
-    """
-    EMPTY = pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
-                                   "Quarterly Payout(%)", "Annual Payout(%)"])
-    if f is None:
-        return EMPTY
-
-    f.seek(0)
-    df = read_file(f)
-    if df is None or df.empty:
-        return EMPTY
-
-    col_map = {}
-    for c in df.columns:
-        cl = str(c).lower().strip()
-        if "growth min" in cl or "growth_min" in cl:
-            if "Growth Min(%)" not in col_map.values():
-                col_map[c] = "Growth Min(%)"
-        elif "growth max" in cl or "growth_max" in cl:
-            if "Growth Max(%)" not in col_map.values():
-                col_map[c] = "Growth Max(%)"
-        elif any(k in cl for k in ["quarterly", "q payout", "q%", "qtr"]):
-            if "Quarterly Payout(%)" not in col_map.values():
-                col_map[c] = "Quarterly Payout(%)"
-        elif any(k in cl for k in ["annual", "a payout", "a%", "yearly"]):
-            if "Annual Payout(%)" not in col_map.values():
-                col_map[c] = "Annual Payout(%)"
-        elif any(k in cl for k in ["min", "from", "lower", "start"]):
-            if "Growth Min(%)" not in col_map.values():
-                col_map[c] = "Growth Min(%)"
-        elif any(k in cl for k in ["max", "to", "upper", "end"]):
-            if "Growth Max(%)" not in col_map.values():
-                col_map[c] = "Growth Max(%)"
-
-    df = df.rename(columns=col_map)
-
-    for col, default in [("Growth Min(%)", 0), ("Growth Max(%)", 9999),
-                          ("Quarterly Payout(%)", 0), ("Annual Payout(%)", 0)]:
-        if col not in df.columns:
-            df[col] = default
-
-    def _n(s, d=0.0):
-        return pd.to_numeric(
-            s.astype(str).str.replace(",", "", regex=False).str.strip(),
-            errors="coerce").fillna(d)
-
-    df["Growth Min(%)"]       = _n(df["Growth Min(%)"],       0.0)
-    df["Growth Max(%)"]       = _n(df["Growth Max(%)"],    9999.0)
-    df["Quarterly Payout(%)"] = _n(df["Quarterly Payout(%)"], 0.0)
-    df["Annual Payout(%)"]    = _n(df["Annual Payout(%)"],    0.0)
-
-    df = df.dropna(subset=["Growth Min(%)"]).reset_index(drop=True)
-    return df[["Growth Min(%)", "Growth Max(%)",
-               "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
 
 
 
 
-
-
-# processor.py | VLDS Pro v2 — Forest Dealerships
+        # processor.py | VLDS Pro v2 — Forest Dealerships
 import pandas as pd
 import numpy as np
 from io import BytesIO
@@ -1295,33 +981,48 @@ class VLDSProcessor:
                 self.L("  " + traceback.format_exc(), "error")
 
         # ── Incentive calculations ─────────────────────────────────────────────
-        # Rules:
-        #   - If Q-prev == 0 or missing → Growth %, Discount %, Discount Value = 0
-        #   - Growth % = (Q-curr - Q-prev) / Q-prev × 100   (only when Q-prev > 0)
-        #   - Discount Value = Final Amount Q-curr × Discount % / 100
+        # Step-by-step logic (matches project brief exactly):
+        #
+        #  1. Growth % = (Final Amt Q-curr - Final Amt Q-prev) / Final Amt Q-prev × 100
+        #     → Only calculated when Q-prev > 0. Zero otherwise.
+        #
+        #  2. Discount % = look up Growth % in slab table → get Quarterly or Annual Payout %
+        #     → Slab table defines brackets: Growth Min(%) ≤ growth < Growth Max(%)
+        #     → Zero if Q-prev = 0 (nothing to base the slab on)
+        #
+        #  3. Discount Value = Final Amount Q-curr × Discount % / 100
+        #     → Applied on current quarter sales (Q-curr), not Q-prev
+        #     → Zero if Q-prev = 0
+        #
+        #  4. Increase = Final Amt Q-curr - Final Amt Q-prev (always shown)
         payout_col = ("Quarterly Payout(%)" if "quarterly" in slab_type.lower()
                       else "Annual Payout(%)")
         q_curr = _num(sm[fa_curr])
         q_prev = _num(sm[fa_prev])
-        sm[fa_curr] = q_curr
-        sm[fa_prev] = q_prev
+        sm[fa_curr]    = q_curr
+        sm[fa_prev]    = q_prev
         sm["Increase"] = q_curr - q_prev
 
-        # Only calculate growth/discount where prev year data exists
+        # Rows where prev year data actually exists
         has_prev = q_prev > 0
-        growth   = pd.Series(0.0, index=sm.index)
-        growth[has_prev] = ((q_curr[has_prev] - q_prev[has_prev])
-                            / q_prev[has_prev] * 100)
+
+        # 1. Growth %
+        growth = pd.Series(0.0, index=sm.index)
+        growth[has_prev] = (
+            (q_curr[has_prev] - q_prev[has_prev]) / q_prev[has_prev] * 100
+        )
         sm["Growth %"] = growth.replace([np.inf, -np.inf], 0).fillna(0)
 
+        # 2. Discount % — look up each row's Growth % in the slab table
         disc_pct = pd.Series(0.0, index=sm.index)
         disc_pct[has_prev] = sm.loc[has_prev, "Growth %"].apply(
-            lambda g: self._slab_lookup(g, payout_col))
+            lambda g: self._slab_lookup(g, payout_col)
+        )
         sm["Discount %"] = disc_pct
 
-        # Discount Value on Final Amount Q-curr
+        # 3. Discount Value = Final Amount Q-curr × Discount % / 100
         disc_val = pd.Series(0.0, index=sm.index)
-        disc_val[has_prev] = (q_curr[has_prev] * disc_pct[has_prev] / 100)
+        disc_val[has_prev] = q_curr[has_prev] * disc_pct[has_prev] / 100
         sm["Discount Value"] = disc_val.fillna(0)
 
         for c in sm.select_dtypes(include=[np.number]).columns:
@@ -1607,88 +1308,3 @@ class VLDSProcessor:
                                                      pivot, summary, eligible, curr_lbl)
         p(100, "Done ✓")
         return output, self.log, self.stats
-
-
-
-
-
-
-
-
-# config.py | VLDS Pro v2 — Forest Dealerships
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# IMPORTANT — No hardcoded exclusion list or slab table here.
-#
-# Both the Exclusion List and Slab Table MUST be uploaded as files every
-# quarter via the UI. This ensures:
-#   • The client can add, remove, or change exclusion criteria each quarter
-#     without any code change.
-#   • Slab rates can be updated each quarter without touching the code.
-#   • The output is always driven by what the client uploads, not by what
-#     was hardcoded at some point in the past.
-#
-# The upload widgets for both files are marked REQUIRED in the UI.
-# The Run button will not activate until both files are uploaded.
-#
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ── Column synonyms ───────────────────────────────────────────────────────────
-# Used by fcol() in utils.py to find columns regardless of exact name.
-# Extend this if your VLDS file ever uses a column name not listed here.
-COL_SYNS = {
-    "lob":         ["lob", "line of business"],
-    "sub_lob":     ["sub lob", "sublob", "sub-lob"],
-    "segment":     ["segment"],
-    "inv_type":    ["invoice type", "invoicetype", "order header subtype code",
-                    "transaction type"],
-    "batch_src":   ["batch source", "batchsource", "batch_source"],
-    "item":        ["item", "item number", "item_number", "item code", "item no"],
-    "line_item":   ["line item", "line item description",
-                    "inventory item description", "item description"],
-    "revenue":     ["revenue amount", "revenue_amount", "rev amount"],
-    "inv_no":      ["invoice number", "invoice_number", "invoice no"],
-    "cust_name":   ["customer account name", "customer name",
-                    "customername", "account name"],
-    "cust_no":     ["customer account number", "customer number",
-                    "customer_number", "customer no", "account number",
-                    "dealer number", "customer acct number"],
-    "month":       ["reporting to fiscal month", "reporting fiscal month name",
-                    "reporting fiscal month", "fiscal month", "cmi month",
-                    "month", "period"],
-    "zone":        ["zone", "region", "territory"],
-    "bd":          ["bd", "b.d", "b.d."],
-    "remark":      ["remark", "remarks", "consider for vd", "consider for vlds",
-                    "eligible sales/ not eligible",
-                    "eligible sales/not eligible"],
-    "dealer_cust_no": ["customer number", "dealer number", "customer account number",
-                       "cust no", "account number"],
-}
-
-# ── ALL_KNOWN: used by header-row auto-detector in utils.py ──────────────────
-# Add every possible column heading your files might have.
-ALL_KNOWN = {
-    "lob", "line of business", "sub lob", "sublob", "segment",
-    "invoice type", "invoicetype", "order header subtype code", "transaction type",
-    "invoice number", "invoice no", "invoice_number",
-    "batch source", "batchsource", "batch_source",
-    "item", "item number", "item_number", "item code", "item no",
-    "line item", "line item description", "inventory item description", "item description",
-    "revenue amount", "revenue_amount", "rev amount",
-    "customer account name", "customer name", "customername", "account name",
-    "customer account number", "customer number", "customer_number",
-    "customer no", "account number", "dealer number", "customer acct number",
-    "reporting to fiscal month", "reporting fiscal month name",
-    "reporting fiscal month", "fiscal month", "cmi month", "month", "period",
-    "zone", "region", "territory",
-    "bd", "b.d", "b.d.",
-    "remark", "remarks", "consider for vd", "consider for vlds",
-    "eligible sales/ not eligible", "eligible sales/not eligible",
-    "q4-24", "q4 24", "q4_24", "q4-2024", "q4-25", "q4 25",
-    "final amount q4-24", "final amount q4-25",
-    "previous quarter", "prev quarter", "grand total",
-    "increase", "growth %", "discount %", "discount value",
-    "sr no", "sr.no", "s.no", "serial no", "particulars", "description",
-    "column", "apply to", "where",
-    "growth min(%)", "growth max(%)", "quarterly payout(%)", "annual payout(%)",
-}
