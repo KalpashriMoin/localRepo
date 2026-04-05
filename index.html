@@ -651,75 +651,93 @@ class VLDSProcessor:
 
     def _build_slab_brackets(self, payout_col):
         """
-        Parse the slab table ONCE into a clean list of (lo, hi, pct) tuples.
-        This is called once per run, not once per row.
-        Returns list of (lo, hi, discount_pct) sorted by lo ascending.
+        Parse the slab DataFrame into clean (lo, hi, pct) brackets.
+        Strategy: try column-name matching first; if that yields nothing,
+        fall back to positional columns (col0=min, col1=max, col2 or col3=payout).
         """
         if self.slab is None or self.slab.empty:
             self.L("  ⚠ Slab table empty", "warning")
             return []
 
-        # Log raw slab so user can see what was read
-        self.L(f"  Slab raw columns: {list(self.slab.columns)}")
-        for i, row in self.slab.iterrows():
-            self.L(f"    Slab row {i}: {dict(row)}")
+        self.L(f"  Slab columns: {list(self.slab.columns)}")
+        self.L(f"  Slab shape: {self.slab.shape}")
+        self.L(f"  Slab first 2 rows:\n{self.slab.head(2).to_string()}")
 
-        # Find columns by substring match — much more forgiving than exact match
-        def _pick(col_hints):
-            cols_lower = {str(c).lower().strip(): c for c in self.slab.columns}
-            # exact match first
-            for h in col_hints:
+        cols = list(self.slab.columns)
+        cols_lower = {str(c).lower().strip(): c for c in cols}
+
+        def _pick_by_name(hints):
+            """Exact then substring match against column names."""
+            for h in hints:
                 if h in cols_lower:
                     return cols_lower[h]
-            # substring match fallback
-            for h in col_hints:
+            for h in hints:
                 for k, v in cols_lower.items():
-                    if h in k or k in h:
+                    if h and k and (h in k or k in h):
                         return v
             return None
 
-        min_c = _pick(["growth min(%)","growth min","min(%)","min %","min","from","lower","start"])
-        max_c = _pick(["growth max(%)","growth max","max(%)","max %","max","to","upper","end"])
+        min_c = _pick_by_name(["growth min(%)","growth min","min(%)","min %","min","from","lower"])
+        max_c = _pick_by_name(["growth max(%)","growth max","max(%)","max %","max","to","upper"])
 
-        # For payout col — try the exact requested name first, then fallbacks
-        pay_hints = [payout_col.lower().strip()]
-        if "quarterly" in payout_col.lower():
-            pay_hints += ["quarterly payout(%)","quarterly payout","quarterly %","quarterly"]
+        use_quarterly = "quarterly" in payout_col.lower()
+        if use_quarterly:
+            pay_hints = ["quarterly payout(%)","quarterly payout","quarterly %",
+                         "q payout","quarterly","payout(%)","payout"]
         else:
-            pay_hints += ["annual payout(%)","annual payout","annual %","annual"]
-        pay_hints += ["payout(%)","payout %","payout","discount %","discount"]
-        pay_c = _pick(pay_hints)
+            pay_hints = ["annual payout(%)","annual payout","annual %",
+                         "a payout","annual","payout(%)","payout"]
+        pay_c = _pick_by_name(pay_hints)
 
-        self.L(f"  Slab matched: min_col='{min_c}' max_col='{max_c}' pay_col='{pay_c}'")
+        # ── Positional fallback ───────────────────────────────────────────────
+        # If name matching failed, use column positions:
+        # col[0]=min, col[1]=max, col[2]=quarterly payout, col[3]=annual payout
+        if not min_c and len(cols) >= 1:
+            min_c = cols[0]
+            self.L(f"  Using positional col[0] as min: '{min_c}'", "warning")
+        if not max_c and len(cols) >= 2:
+            max_c = cols[1]
+            self.L(f"  Using positional col[1] as max: '{max_c}'", "warning")
+        if not pay_c:
+            if use_quarterly and len(cols) >= 3:
+                pay_c = cols[2]
+            elif not use_quarterly and len(cols) >= 4:
+                pay_c = cols[3]
+            elif len(cols) >= 3:
+                pay_c = cols[2]
+            if pay_c:
+                self.L(f"  Using positional col as payout: '{pay_c}'", "warning")
+
+        self.L(f"  Slab col mapping → min='{min_c}' max='{max_c}' payout='{pay_c}'")
 
         if not min_c or not pay_c:
-            self.L(f"  ⚠ Cannot find min or payout column in slab. "
-                   f"Columns available: {list(self.slab.columns)}", "error")
+            self.L(f"  ⚠ Still cannot map slab columns. "
+                   f"Columns: {cols}", "error")
             return []
 
         brackets = []
-        for _, row in self.slab.iterrows():
+        for idx, row in self.slab.iterrows():
             try:
-                lo_raw = str(row[min_c]).replace(",","").strip() if pd.notna(row[min_c]) else "0"
-                hi_raw = str(row[max_c]).replace(",","").strip() if (max_c and pd.notna(row[max_c])) else "999999"
-                p_raw  = str(row[pay_c]).replace(",","").strip() if pd.notna(row[pay_c]) else "0"
+                lo_raw = str(row[min_c]).replace(",","").strip() if pd.notna(row[min_c]) else ""
+                hi_raw = str(row[max_c]).replace(",","").strip() if (max_c and pd.notna(row[max_c])) else ""
+                p_raw  = str(row[pay_c]).replace(",","").strip() if pd.notna(row[pay_c]) else ""
 
-                # Skip header-like rows
-                if any(x in lo_raw.lower() for x in ["min","growth","nan",""]):
+                # Skip blank or non-numeric rows (header rows etc.)
+                if not lo_raw or lo_raw.lower() in ("nan","none","min","growth min","growth min(%)"):
                     continue
-                if lo_raw == "" or p_raw == "":
+                if not p_raw or p_raw.lower() in ("nan","none","payout","quarterly payout","annual payout"):
                     continue
 
                 lo = float(lo_raw)
-                hi = float(hi_raw) if hi_raw not in ("","nan","999999.0") else 999999.0
+                hi = float(hi_raw) if hi_raw and hi_raw.lower() not in ("nan","none","") else 999999.0
                 p  = float(p_raw)
                 brackets.append((lo, hi, p))
-                self.L(f"    Bracket: {lo}% ≤ growth < {hi}% → discount={p}%")
+                self.L(f"    ✔ Bracket [{lo}% – {hi}%) → {p}%")
             except Exception as ex:
-                self.L(f"    Skipping slab row (parse error: {ex})")
+                self.L(f"    Skipped row {idx}: {ex} | raw=({lo_raw!r},{hi_raw!r},{p_raw!r})")
                 continue
 
-        self.L(f"  {len(brackets)} valid slab brackets built",
+        self.L(f"  → {len(brackets)} brackets built",
                "success" if brackets else "error")
         return sorted(brackets, key=lambda x: x[0])
 
