@@ -1,1 +1,637 @@
 
+# app.py | VLDS Pro v2 — Forest Dealerships
+# Canyon #C4622D | Willow #5C7A4E | Summit #3D4F63
+import streamlit as st
+import pandas as pd
+import traceback, base64, os, re
+
+from auth      import verify_login
+from utils     import parse_excl, parse_slab, read_file
+from processor import VLDSProcessor
+
+st.set_page_config(
+    page_title="VLDS Pro — Forest Dealerships",
+    page_icon="🏭", layout="wide",
+    initial_sidebar_state="collapsed")
+
+LOGO_PATH = ""  # ← set your logo path here e.g. "assets/logo.png"
+
+def _logo():
+    if LOGO_PATH and os.path.exists(LOGO_PATH):
+        ext  = LOGO_PATH.rsplit(".",1)[-1].lower()
+        mime = {"png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg",
+                "svg":"image/svg+xml"}.get(ext,"image/png")
+        b64  = base64.b64encode(open(LOGO_PATH,"rb").read()).decode()
+        return f'<img src="data:{mime};base64,{b64}" style="height:36px;width:auto;">'
+    return '<span style="font-size:1.25rem;font-weight:900;color:#C4622D;">FD</span>'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CSS — kill all streamlit chrome, use full viewport, breathable spacing
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("""
+<style>
+/* ═══ KILL ALL STREAMLIT CHROME AND SPACING ═══ */
+#MainMenu,footer,header,
+[data-testid="stToolbar"],[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],[data-testid="stSidebarNav"],
+[data-testid="collapsedControl"]
+{display:none!important;height:0!important;min-height:0!important;
+ overflow:hidden!important;visibility:hidden!important;}
+
+/* Full bleed — zero outer padding everywhere */
+[data-testid="stAppViewContainer"]{background:#F4F5F7;}
+[data-testid="stAppViewBlockContainer"]{
+  padding:0!important;max-width:100%!important;width:100%!important;}
+section.main>div.block-container{
+  padding:1.1rem 1.5rem 1rem 1.5rem!important;
+  max-width:100%!important;width:100%!important;}
+
+/* Collapse Streamlit's internal gaps to minimum */
+[data-testid="stVerticalBlock"]{gap:0.35rem!important;}
+[data-testid="stHorizontalBlock"]{gap:0.6rem!important;}
+
+/* Kill default element margins */
+div.element-container{margin:0!important;padding:0!important;}
+div.stMarkdown{margin:0!important;padding:0!important;}
+
+*{box-sizing:border-box;}
+
+/* ═══ FILE UPLOADER — Browse button only, nothing else ═══ */
+[data-testid="stFileUploader"]{margin:0!important;padding:0!important;}
+[data-testid="stFileUploader"]>div{padding:0!important;margin:0!important;}
+
+/* Hide EVERYTHING inside the dropzone except the button */
+[data-testid="stFileUploaderDropzoneInstructions"]{display:none!important;}
+[data-testid="stFileUploader"] small{display:none!important;}
+[data-testid="stFileUploaderDropzone"] p{display:none!important;}
+[data-testid="stFileUploaderDropzone"] span:not(:has(button)){display:none!important;}
+
+/* Dropzone: just tall enough for the button */
+[data-testid="stFileUploaderDropzone"]{
+  padding:0!important;margin:0!important;
+  min-height:34px!important;max-height:36px!important;
+  background:transparent!important;border:none!important;
+  overflow:hidden!important;}
+[data-testid="stFileUploaderDropzone"]>div{
+  display:flex!important;align-items:center!important;
+  min-height:32px!important;padding:0!important;margin:0!important;}
+
+/* Browse button — visible, styled */
+[data-testid="stFileUploader"] button{
+  font-size:.65rem!important;padding:.2rem .8rem!important;
+  height:28px!important;min-height:28px!important;line-height:1.3!important;
+  border-radius:5px!important;white-space:nowrap!important;
+  background:#3D4F63!important;color:#fff!important;
+  border:none!important;font-weight:700!important;cursor:pointer!important;
+  flex-shrink:0!important;display:block!important;}
+[data-testid="stFileUploader"] button:hover{background:#C4622D!important;}
+
+/* Uploaded file chip */
+[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"]{
+  font-size:.6rem!important;padding:2px 7px!important;
+  border-radius:4px!important;background:#EBF2E8!important;
+  border:1px solid #5C7A4E!important;color:#2D6B21!important;
+  max-width:180px!important;overflow:hidden!important;text-overflow:ellipsis!important;}
+[data-testid="stFileUploader"] [data-testid="stFileUploaderDeleteBtn"]{
+  width:14px!important;height:14px!important;min-width:0!important;
+  padding:0!important;}
+
+/* ═══ TOPBAR ═══ */
+.topbar{background:linear-gradient(135deg,#3D4F63,#2C3A4A);
+  border-radius:10px;padding:.65rem 1.4rem;margin-bottom:.75rem;
+  display:flex;align-items:center;justify-content:space-between;
+  border-left:5px solid #C4622D;}
+.topbar-left{display:flex;align-items:center;gap:.8rem;}
+.logo-box{width:40px;height:40px;border-radius:9px;background:#fff;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.tb-title{color:#fff;font-size:.92rem;font-weight:900;line-height:1.25;}
+.tb-sub{color:rgba(255,255,255,.4);font-size:.6rem;margin-top:2px;}
+.topbar-right{display:flex;gap:.4rem;align-items:center;}
+.pill{padding:3px 12px;border-radius:20px;font-size:.57rem;font-weight:700;
+  border:1px solid rgba(255,255,255,.18);color:rgba(255,255,255,.88);
+  background:rgba(255,255,255,.1);white-space:nowrap;}
+.pill-c{background:rgba(196,98,45,.28);border-color:#C4622D;color:#F5D9CF;}
+.pill-w{background:rgba(92,122,78,.28);border-color:#5C7A4E;color:#C8DBBF;}
+
+/* ═══ SECTION HEADING ═══ */
+.sec-head{font-size:.57rem;font-weight:900;letter-spacing:1.1px;
+  text-transform:uppercase;color:#3D4F63;
+  padding-left:.5rem;border-left:3px solid #C4622D;
+  margin:.6rem 0 .35rem;}
+
+/* ═══ FILE CARD ═══ */
+.fc{background:#fff;border:1.5px solid #D1D5DB;border-radius:9px;
+  padding:.6rem .85rem .5rem;transition:all .15s;}
+.fc.fc-ok  {border-color:#5C7A4E;background:#F2F7F0;}
+.fc.fc-missing{border-color:#C4622D;border-style:dashed;background:#FDF4F1;}
+.fc.fc-warn{border-color:#D97706;background:#FFFBEB;}
+.fc-header{display:flex;align-items:center;gap:.5rem;}
+.fc-icon  {font-size:.88rem;flex-shrink:0;line-height:1;}
+.fc-label {font-size:.7rem;font-weight:800;color:#3D4F63;flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.badge    {font-size:.51rem;font-weight:800;border-radius:5px;
+  padding:2px 7px;line-height:1.5;flex-shrink:0;}
+.badge-req{background:#FDF4F1;color:#C4622D;border:1px solid #C4622D;}
+.badge-ok {background:#EBF2E8;color:#2D6B21;border:1px solid #5C7A4E;}
+.badge-opt{background:#EEF1F4;color:#3D4F63;border:1px solid #B0BAC7;}
+.badge-warn{background:#FEF3C7;color:#92400E;border:1px solid #D97706;}
+.fc-filename {font-size:.6rem;font-weight:600;color:#5C7A4E;
+  margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.fc-empty {font-size:.6rem;color:#9CA3AF;font-style:italic;margin-top:3px;}
+.fc-warning{font-size:.58rem;font-weight:600;color:#92400E;
+  background:#FEF3C7;border-radius:4px;padding:2px 7px;margin-top:4px;line-height:1.5;}
+
+/* ═══ CONFIG PANEL ═══ */
+.cfg-panel{background:#fff;border:1.5px solid #D1D5DB;border-radius:9px;
+  padding:.8rem 1rem .7rem;margin-bottom:.6rem;}
+.cfg-title{font-size:.54rem;font-weight:900;letter-spacing:.9px;
+  text-transform:uppercase;color:#3D4F63;margin-bottom:.5rem;}
+
+/* ═══ WIDGETS ═══ */
+[data-testid="stSelectbox"]{margin:0!important;}
+[data-testid="stSelectbox"] label{font-size:.62rem!important;font-weight:700!important;
+  color:#3D4F63!important;margin-bottom:.04rem!important;}
+[data-testid="stSelectbox"] [data-baseweb="select"]>div{
+  min-height:32px!important;font-size:.68rem!important;}
+[data-testid="stTextInput"]{margin:0!important;}
+[data-testid="stTextInput"] label{font-size:.62rem!important;font-weight:700!important;
+  color:#3D4F63!important;margin-bottom:.04rem!important;}
+[data-testid="stTextInput"] input{
+  min-height:32px!important;font-size:.68rem!important;padding:.18rem .45rem!important;}
+[data-testid="stRadio"]{margin:0!important;}
+[data-testid="stRadio"]>label{font-size:.62rem!important;font-weight:700!important;
+  color:#3D4F63!important;}
+[data-testid="stRadio"]>div{gap:.4rem!important;margin-top:.06rem!important;}
+[data-testid="stRadio"] label span{font-size:.66rem!important;}
+
+/* ═══ BUTTONS ═══ */
+div[data-testid="stButton"]>button[kind="primary"]{
+  background:linear-gradient(135deg,#C4622D,#A34E22)!important;
+  color:#fff!important;border:none!important;border-radius:7px!important;
+  font-weight:900!important;font-size:.74rem!important;
+  padding:.42rem 1rem!important;width:100%!important;}
+div[data-testid="stButton"]>button[kind="primary"]:hover{
+  background:linear-gradient(135deg,#A34E22,#7A3A18)!important;}
+div[data-testid="stButton"]>button:disabled{opacity:.2!important;}
+div[data-testid="stDownloadButton"]>button{
+  background:linear-gradient(135deg,#5C7A4E,#3D6B31)!important;
+  color:#fff!important;border:none!important;border-radius:7px!important;
+  font-weight:700!important;font-size:.7rem!important;
+  padding:.38rem .8rem!important;width:100%!important;}
+div[data-testid="stDownloadButton"]>button:hover{
+  background:linear-gradient(135deg,#3D6B31,#2D5024)!important;}
+div[data-testid="stButton"]>button:not([kind="primary"]){
+  border-radius:7px!important;font-size:.7rem!important;
+  padding:.38rem .8rem!important;width:100%!important;opacity:.26!important;}
+
+/* ═══ STATS ═══ */
+.stats-card{background:linear-gradient(135deg,#3D4F63,#2C3A4A);
+  border-radius:9px;padding:.8rem 1.1rem;
+  border-left:4px solid #5C7A4E;margin-top:.35rem;}
+.stats-row{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;}
+.stat-item .sv{font-size:1.1rem;font-weight:900;line-height:1;}
+.stat-item .sl{font-size:.49rem;color:rgba(255,255,255,.38);
+  margin-top:3px;letter-spacing:.5px;text-transform:uppercase;}
+
+/* ═══ INFO BOXES ═══ */
+.info-box{border-radius:7px;padding:.5rem .8rem;font-size:.63rem;
+  line-height:1.6;margin:.3rem 0;}
+.info-box.green{background:#EBF2E8;border:1px solid #5C7A4E;color:#2D6B21;}
+.info-box.orange{background:#FDF4F1;border:1px solid #C4622D;color:#A34E22;}
+
+/* ═══ MISC ═══ */
+[data-testid="stProgress"]{margin:.1rem 0!important;}
+div.stAlert{font-size:.67rem!important;border-radius:7px!important;}
+
+/* ═══ LOGIN ═══ */
+.login-wrap{min-height:88vh;display:flex;align-items:center;justify-content:center;}
+.login-card{background:#fff;border:2px solid #C4622D;border-radius:14px;
+  padding:2.5rem 2.8rem 2.2rem;width:400px;
+  box-shadow:0 8px 32px rgba(196,98,45,.12);}
+.login-title{font-size:1.15rem;font-weight:900;color:#3D4F63;
+  text-align:center;margin-bottom:.3rem;}
+.login-sub{font-size:.7rem;color:#5C7A4E;font-weight:600;
+  text-align:center;margin-bottom:1.4rem;}
+.login-err{background:#FEF2F2;border:1px solid #FECACA;border-radius:7px;
+  padding:.45rem .75rem;font-size:.67rem;color:#B91C1C;
+  margin-bottom:.8rem;text-align:center;}
+</style>
+""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SESSION STATE
+# ══════════════════════════════════════════════════════════════════════════════
+for k, v in {
+    "authenticated": False, "username": "", "login_error": "",
+    "files": {}, "file_warnings": {},
+    "result": None, "logs": [], "stats": {},
+    "log_txt": "", "year_custom": "",
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+S = st.session_state
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGIN
+# ══════════════════════════════════════════════════════════════════════════════
+if not S.authenticated:
+    st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 1.1, 1])
+    with mid:
+        st.markdown(f"""
+        <div class="login-card">
+          <div style="text-align:center;margin-bottom:1.4rem;">{_logo()}</div>
+          <div class="login-title">VLDS Incentive Processor</div>
+          <div class="login-sub">Forest Dealerships · Sign in to continue</div>
+          {"<div class='login-err'>⚠ " + S.login_error + "</div>" if S.login_error else ""}
+        </div>""", unsafe_allow_html=True)
+
+        u = st.text_input("Username", placeholder="Enter your username", key="li_u")
+        p = st.text_input("Password", type="password",
+                           placeholder="Enter your password", key="li_p")
+
+        if st.button("Sign In →", type="primary", use_container_width=True):
+            if not u or not p:
+                S.login_error = "Please enter both username and password."
+                st.rerun()
+            elif verify_login(u, p):
+                S.authenticated = True
+                S.username = u.strip().lower()
+                S.login_error = ""
+                st.rerun()
+            else:
+                S.login_error = "Invalid username or password. Try again."
+                st.rerun()
+
+        st.markdown("""
+        <div style="font-size:0.6rem;color:#9CA3AF;text-align:center;
+                    margin-top:1rem;line-height:1.7;">
+          Access restricted to authorised users only.<br>
+          Contact your administrator if you need access.
+        </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE VALIDATION — filename keywords only (fast, no file reading)
+# ══════════════════════════════════════════════════════════════════════════════
+SLOT_KW = {
+    "vlds_main":   ["vlds","highway","main","sales export","4s main","cmi"],
+    "df_recd":     ["df recd","dfrecd","df&recd","discount factor","recd"],
+    "prev_year":   ["prev","previous","prior","summary","q4-24","q4-23","last year"],
+    "dealer_list": ["dealer list","4s dealer","dealer master","authorised dealer"],
+    "excl_file":   ["exclusion","excl list","exclusion list","exclude"],
+    "slab_file":   ["slab","slab table","payout slab","incentive slab"],
+    "base_data":   ["base data","base_data","reference data"],
+}
+SLOT_NAMES = {
+    "vlds_main":"VLDS Main File", "df_recd":"DF & RECD File",
+    "prev_year":"Previous Year Summary", "dealer_list":"4S Dealer List",
+    "excl_file":"Exclusion List", "slab_file":"Slab Table", "base_data":"Base Data",
+}
+
+def _check_file(key, f):
+    """Fast filename-only validation. Returns warning string or ''."""
+    if f is None:
+        return ""
+    fname = f.name.lower().replace("_"," ").replace("-"," ")
+    # Score every slot
+    scores = {s: sum(1 for kw in kws if kw in fname)
+              for s, kws in SLOT_KW.items()}
+    best       = max(scores, key=lambda s: scores[s])
+    my_score   = scores[key]
+    best_score = scores[best]
+    # Only warn if another slot scores strictly higher AND has at least 1 keyword hit
+    if best_score >= 1 and best != key and best_score > my_score:
+        return f"Filename matches '{SLOT_NAMES[best]}' — verify this is correct."
+    return ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TOPBAR
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(f"""
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="logo-box">{_logo()}</div>
+    <div>
+      <div class="tb-title">VLDS Incentive Processor</div>
+      <div class="tb-sub">Forest Dealerships &nbsp;·&nbsp; 4S Dealer Eligibility &amp; Quarterly Payout</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="pill pill-c">VLDS Pro v2</span>
+    <span class="pill pill-w">Forest Dealerships</span>
+    <span class="pill">👤 {S.username}</span>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE DEFINITIONS
+# ══════════════════════════════════════════════════════════════════════════════
+FILE_DEFS = [
+    ("vlds_main",   "📊", "VLDS Main File",        True),
+    ("df_recd",     "🔗", "DF & RECD File",         True),
+    ("prev_year",   "📅", "Previous Year Summary",  True),
+    ("dealer_list", "🏪", "4S Dealer List",         True),
+    ("excl_file",   "📋", "Exclusion List",         True),
+    ("slab_file",   "📈", "Slab Table",             True),
+    ("base_data",   "🗂️", "Base Data",              False),
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN LAYOUT — Left 55% files | Right 45% config+actions
+# ══════════════════════════════════════════════════════════════════════════════
+left, right = st.columns([11, 9], gap="large")
+
+# ────────────────────────────────────────────────────────────────────────────
+# LEFT PANEL — File pickers
+# ────────────────────────────────────────────────────────────────────────────
+with left:
+    st.markdown('<div class="sec-head">📂 Input Files</div>', unsafe_allow_html=True)
+
+    for key, icon, label, req in FILE_DEFS:
+        # Read directly from Streamlit's widget state — this is always current
+        # even without st.rerun(), because Streamlit updates session_state
+        # before running the script body.
+        widget_key = f"fu_{key}"
+        up_from_state = st.session_state.get(widget_key)
+        if up_from_state is not None and up_from_state.size <= 209_715_200:
+            S.files[key] = up_from_state
+            if key not in S.file_warnings:
+                S.file_warnings[key] = _check_file(key, up_from_state)
+
+        loaded  = key in S.files
+        warning = S.file_warnings.get(key, "")
+
+        # Card style
+        if warning:    card_cls = "fc fc-warn"
+        elif loaded:   card_cls = "fc fc-ok"
+        elif req:      card_cls = "fc fc-missing"
+        else:          card_cls = "fc"
+
+        # Badge
+        if warning:    badge_cls, badge_txt = "badge-warn", "⚠ Verify"
+        elif loaded:   badge_cls, badge_txt = "badge-ok",   "✓ Loaded"
+        elif req:      badge_cls, badge_txt = "badge-req",  "Required"
+        else:          badge_cls, badge_txt = "badge-opt",  "Optional"
+
+        fname   = S.files[key].name if loaded else ""
+        warn_html = f'<div class="fc-warning">⚠ {warning}</div>' if warning else ""
+        body      = (f'<div class="fc-filename">✓ {fname[:55]}</div>'
+                     if loaded else
+                     f'<div class="fc-empty">No file selected — click Browse to upload</div>')
+
+        st.markdown(f"""
+        <div class="{card_cls}">
+          <div class="fc-header">
+            <span class="fc-icon">{icon}</span>
+            <span class="fc-label">{label}</span>
+            <span class="badge {badge_cls}">{badge_txt}</span>
+          </div>
+          {body}
+          {warn_html}
+        </div>""", unsafe_allow_html=True)
+
+        # Native uploader — full width, instructions hidden by CSS above
+        up = st.file_uploader(
+            f"Upload {label}", type=["xlsx", "xls", "csv"],
+            key=f"fu_{key}", label_visibility="collapsed")
+
+        # Store file directly — NO st.rerun() here.
+        # st.rerun() after upload resets Streamlit's uploader widget state
+        # which prevents subsequent files from being uploaded.
+        if up is not None:
+            if up.size > 209_715_200:
+                st.error("❌ File exceeds 200 MB limit.")
+            else:
+                S.files[key]         = up
+                S.file_warnings[key] = _check_file(key, up)
+                # Do NOT call st.rerun() — let Streamlit naturally re-render
+
+        # Remove button — only when loaded
+        if loaded:
+            rc1, rc2 = st.columns([3,1], gap="small")
+            with rc2:
+                if st.button("✕ Remove", key=f"rm_{key}", use_container_width=True):
+                    del S.files[key]
+                    S.file_warnings.pop(key, None)
+                    # Also clear the uploader widget state so it shows empty
+                    if f"fu_{key}" in st.session_state:
+                        del st.session_state[f"fu_{key}"]
+                    st.rerun()
+
+# ────────────────────────────────────────────────────────────────────────────
+# RIGHT PANEL — Config + Actions
+# ────────────────────────────────────────────────────────────────────────────
+with right:
+
+    # ── Quarter & Year settings ──────────────────────────────────────────────
+    st.markdown('<div class="sec-head">⚙️ Report Settings</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cfg-panel"><div class="cfg-title">Quarter · Year · Payout Type</div>',
+                unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2, gap="small")
+    with c1:
+        quarter_sel = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4"], index=3, key="sel_q")
+    with c2:
+        year_drop = st.selectbox("Year", list(range(2022, 2033)), index=3, key="sel_y")
+
+    year_custom = st.text_input(
+        "Custom Year (overrides dropdown)", value=S.year_custom,
+        placeholder="e.g. 2026 — leave blank to use dropdown above",
+        key="sel_yc")
+    S.year_custom = year_custom.strip()
+    year_sel = (int(S.year_custom)
+                if S.year_custom and re.match(r"^20\d{2}$", S.year_custom)
+                else year_drop)
+
+    slab_type = st.radio("Payout Type", ["Quarterly", "Annual"],
+                          horizontal=True, index=0, key="slab_r")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Auto-detected prev year columns ─────────────────────────────────────
+    _auto_jc, _auto_ac = None, None
+    if "prev_year" in S.files:
+        try:
+            pf = S.files["prev_year"]
+            pf.seek(0)
+            if pf.name.lower().endswith(".csv"):
+                _df = pd.read_csv(pf, nrows=2, dtype=str)
+            else:
+                _raw = pd.read_excel(pf, header=None, nrows=15, dtype=str)
+                _br, _bs = 0, 0
+                for _i, _row in _raw.iterrows():
+                    _sc = sum(1 for v in _row
+                              if pd.notna(v) and len(str(v).strip()) > 1)
+                    if _sc > _bs: _bs, _br = _sc, _i
+                pf.seek(0)
+                _df = pd.read_excel(pf, header=int(_br), nrows=2, dtype=str)
+            pf.seek(0)
+            _cols = [str(c).strip() for c in _df.columns
+                     if not (isinstance(c, float) and pd.isna(c)) and str(c).strip()]
+            # Auto-detect join col
+            for c in _cols:
+                if any(k in c.lower() for k in
+                       ["customer number","customer account","dealer number","dealer no"]):
+                    _auto_jc = c; break
+            if not _auto_jc and _cols:
+                _auto_jc = _cols[0]
+            # Auto-detect amount col
+            for c in _cols:
+                if any(k in c.lower() for k in
+                       ["final amount","grand total"]):
+                    _auto_ac = c; break
+            if not _auto_ac:
+                for c in _cols:
+                    if any(k in c.lower() for k in ["amount","total","sales","q4","q3"]):
+                        _auto_ac = c; break
+            if not _auto_ac and len(_cols) > 2:
+                _auto_ac = _cols[-1]
+        except Exception:
+            pass
+
+        if _auto_jc and _auto_ac:
+            st.markdown(f"""
+            <div class="info-box green">
+              <b>Auto-detected from Previous Year file:</b><br>
+              Customer ID column → <code>{_auto_jc}</code><br>
+              Sales Amount column → <code>{_auto_ac}</code>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="info-box orange">
+              ⚠ Could not auto-detect columns from Previous Year file.
+              Please check the file format.
+            </div>""", unsafe_allow_html=True)
+
+    # ── Run / Download actions ───────────────────────────────────────────────
+    st.markdown('<div class="sec-head" style="margin-top:0.8rem;">▶ Actions</div>',
+                unsafe_allow_html=True)
+
+    req_keys  = ["vlds_main","df_recd","prev_year","dealer_list","excl_file","slab_file"]
+    all_ready = all(k in S.files for k in req_keys)
+    qtr_lbl   = f"{quarter_sel}-{str(year_sel)[-2:]}"
+
+    run_disabled = not all_ready
+    run_btn = st.button(f"🚀  Run {qtr_lbl}", type="primary",
+                         disabled=run_disabled, use_container_width=True)
+
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+    d1, d2 = st.columns(2, gap="small")
+    with d1:
+        if S.result:
+            st.download_button(
+                "📥 Download Report", data=S.result,
+                file_name=f"VLDS_{quarter_sel}_{year_sel}_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+        else:
+            st.button("📥 Report", disabled=True, use_container_width=True)
+    with d2:
+        if S.log_txt:
+            st.download_button(
+                "📋 Download Log", data=S.log_txt,
+                file_name=f"VLDS_{quarter_sel}_{year_sel}_Log.txt",
+                mime="text/plain", use_container_width=True)
+        else:
+            st.button("📋 Log", disabled=True, use_container_width=True)
+
+    # Status / stats
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+    if not all_ready:
+        missing = [n for k, _, n, r in FILE_DEFS if r and k not in S.files]
+        st.warning(f"Awaiting: {' · '.join(missing)}")
+    elif S.result:
+        s = S.stats
+        st.markdown(f"""
+        <div class="stats-card">
+          <div class="stats-row">
+            <div class="stat-item">
+              <div class="sv" style="color:#93C5FD">{s.get("total",0):,}</div>
+              <div class="sl">Total Rows</div>
+            </div>
+            <div class="stat-item">
+              <div class="sv" style="color:#86EFAC">{s.get("eligible",0):,}</div>
+              <div class="sl">Eligible</div>
+            </div>
+            <div class="stat-item">
+              <div class="sv" style="color:#FCA5A5">{s.get("excluded",0):,}</div>
+              <div class="sl">Excluded</div>
+            </div>
+            <div class="stat-item">
+              <div class="sv" style="color:#FCD34D">₹{s.get("sales_cr",0):,.1f} Cr</div>
+              <div class="sl">Eligible Sales</div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        st.success("✓ All files ready — click Run to process")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROCESSING
+# ══════════════════════════════════════════════════════════════════════════════
+if run_btn:
+    S.result = None; S.logs = []; S.stats = {}; S.log_txt = ""
+    prog = st.progress(0, text="Initialising …")
+    lbl  = st.empty()
+
+    def cb(pct, msg):
+        prog.progress(pct, text=msg)
+        lbl.markdown(
+            f'<div style="font-size:0.68rem;color:#5C7A4E;margin:0.1rem 0;">'
+            f'⚙️ {msg}</div>',
+            unsafe_allow_html=True)
+
+    try:
+        excl = parse_excl(S.files["excl_file"])
+        slab = parse_slab(S.files["slab_file"])
+
+        proc = VLDSProcessor(excl, slab)
+        proc.stats["quarter"] = quarter_sel
+        proc.stats["year"]    = str(year_sel)
+
+        out, logs, stats = proc.run(
+            vlds_f   = S.files.get("vlds_main"),
+            dfrecd_f = S.files.get("df_recd"),
+            prev_f   = S.files.get("prev_year"),
+            dealer_f = S.files.get("dealer_list"),
+            prev_join_col = _auto_jc,
+            prev_amt_col  = _auto_ac,
+            slab_type = slab_type,
+            cb = cb)
+
+        S.result = out; S.logs = logs; S.stats = stats
+        lines = [f"VLDS Log — {quarter_sel} {year_sel} | User: {S.username}", "="*65]
+        for e in logs:
+            pfx = {"success":"[OK]   ","warning":"[WARN] ","error":"[ERR]  "
+                  }.get(e["lv"], "       ")
+            lines.append(pfx + str(e["msg"]))
+        S.log_txt = "\n".join(lines)
+        prog.progress(100, text="Done ✓")
+        lbl.success(
+            f"✅ Done — {stats.get('eligible',0):,} eligible rows | "
+            f"₹{stats.get('sales_cr',0):,.1f} Cr eligible sales")
+        st.rerun()
+
+    except Exception as e:
+        prog.empty(); lbl.empty()
+        st.error(f"❌ Processing failed: {e}")
+        with st.expander("Full traceback"):
+            st.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST-RUN STATUS
+# ══════════════════════════════════════════════════════════════════════════════
+if S.logs:
+    ec = sum(1 for e in S.logs if e["lv"] == "error")
+    wc = sum(1 for e in S.logs if e["lv"] == "warning")
+    if ec:
+        st.error(f"⛔ {ec} error(s) during processing — download the log for details.")
+        for e in [x for x in S.logs if x["lv"] == "error"][:3]:
+            st.markdown(f'<small>⛔ {str(e["msg"])[:280]}</small>',
+                        unsafe_allow_html=True)
+    elif wc:
+        st.warning(f"⚠️ {wc} warning(s) — download the log for details.")
