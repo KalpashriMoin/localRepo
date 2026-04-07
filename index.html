@@ -1,4 +1,3 @@
-
 # utils.py | VLDS Pro v2 — Forest Dealerships
 import re
 import pandas as pd
@@ -218,23 +217,27 @@ def parse_excl(f) -> pd.DataFrame:
 # The client can change rates or add/remove brackets each quarter.
 def parse_slab(f) -> pd.DataFrame:
     """
-    Read the slab file uploaded by the user.
-    Returns a DataFrame with exactly 4 columns:
-        Growth Min(%)  |  Growth Max(%)  |  Quarterly Payout(%)  |  Annual Payout(%)
+    Read the slab table Excel file.
 
-    Works by reading the raw file row-by-row with NO assumptions,
-    then finding numeric data rows and mapping them positionally.
-    Column order in slab file is expected to be:
-        col0 = Growth Min  |  col1 = Growth Max  |  col2 = Quarterly  |  col3 = Annual
+    Expected structure (multi-level header):
+        Row 0:  Quarterly          |              | Annual            |
+        Row 1:  Growth over 2024   | Incentive Payout | Growth over 2024 | Incentive Payout
+        Row 2+: [growth_min value] | [payout %]   | [growth_min value]| [payout %]
+
+    The growth column stores the LOWER BOUND of each bracket.
+    Upper bound = next row lower bound (last row covers everything above).
+
+    Returns standard 4-column DataFrame:
+        Growth Min(%) | Growth Max(%) | Quarterly Payout(%) | Annual Payout(%)
     """
     EMPTY = pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
                                    "Quarterly Payout(%)", "Annual Payout(%)"])
     if f is None:
         return EMPTY
+
     try:
         f.seek(0)
         name = str(getattr(f, "name", "")).lower()
-        # Read everything as strings with no header assumption
         if name.endswith(".csv"):
             raw = pd.read_csv(f, header=None, dtype=str)
         else:
@@ -247,72 +250,128 @@ def parse_slab(f) -> pd.DataFrame:
     if raw is None or raw.empty:
         return EMPTY
 
-    # ── Find data rows: rows where at least 2 cells are numeric ─────────────
-    def _is_numeric(v):
-        try:
-            float(str(v).replace(",","").replace("%","").strip())
-            return True
-        except:
-            return False
-
     def _to_float(v):
+        """Convert a cell value to float, handling %, commas, text like Above 30."""
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        s = str(v).strip().replace(",", "").replace("%", "")
+        # Handle text like "Above 30", "More than 30", ">30"
+        for prefix in ["above ", "more than ", "over ", ">", ">=", "upto ", "up to ",
+                       "below ", "less than ", "<", "<="]:
+            if s.lower().startswith(prefix):
+                s = s[len(prefix):].strip()
+                break
+        # Handle ranges like "10-20" or "10 to 20" — take the lower bound
+        for sep in [" to ", "-", "–"]:
+            if sep in s:
+                s = s.split(sep)[0].strip()
+                break
         try:
-            return float(str(v).replace(",","").replace("%","").strip())
+            return float(s)
         except:
             return None
 
+    # ── Find data rows: rows where col0 is numeric (the growth lower bound) ──
     data_rows = []
     for i, row in raw.iterrows():
-        vals = [_to_float(v) for v in row if pd.notna(v) and str(v).strip()]
-        nums = [v for v in vals if v is not None]
-        if len(nums) >= 2:  # at least 2 numeric cells = a data row
-            data_rows.append(nums)
+        v0 = _to_float(row.iloc[0]) if len(row) > 0 else None
+        if v0 is not None:
+            # Extract up to 4 numeric values from this row
+            nums = []
+            for v in row:
+                n = _to_float(v)
+                nums.append(n)
+            data_rows.append((i, nums))
+
+    if not data_rows:
+        # Fallback: try all rows with >= 2 numeric values
+        for i, row in raw.iterrows():
+            nums = [_to_float(v) for v in row]
+            valid = [n for n in nums if n is not None]
+            if len(valid) >= 2:
+                data_rows.append((i, nums))
 
     if not data_rows:
         return EMPTY
 
-    # ── Build result from positional columns ─────────────────────────────────
-    # Expected order: Growth Min | Growth Max | Quarterly Payout | Annual Payout
-    rows_out = []
-    for nums in data_rows:
-        if len(nums) < 2:
-            continue
-        g_min = nums[0] if len(nums) > 0 else 0.0
-        g_max = nums[1] if len(nums) > 1 else 9999.0
-        q_pay = nums[2] if len(nums) > 2 else 0.0
-        a_pay = nums[3] if len(nums) > 3 else q_pay  # fallback to quarterly if no annual
+    # ── Detect column layout ──────────────────────────────────────────────────
+    # Check if file has 4 cols (Q growth, Q pay, A growth, A pay)
+    # or 3 cols (growth, Q pay, A pay)
+    # or 2 cols (growth, pay)
+    ncols = max(len(nums) for _, nums in data_rows)
 
-        # If payout looks like a decimal fraction (e.g. 0.02 meaning 2%), convert to %
-        # Threshold: if value <= 0.5, assume it's a fraction, multiply by 100
-        if 0 < q_pay <= 0.5:
+    result_rows = []
+    for idx, (_, nums) in enumerate(data_rows):
+        # Pad to ncols
+        while len(nums) < ncols:
+            nums.append(None)
+
+        if ncols >= 4:
+            # 4-col layout: col0=Q_growth_min, col1=Q_payout, col2=A_growth_min, col3=A_payout
+            g_min  = nums[0]
+            q_pay  = nums[1]
+            a_pay  = nums[3]
+        elif ncols == 3:
+            # 3-col layout: col0=growth_min, col1=Q_payout, col2=A_payout
+            g_min  = nums[0]
+            q_pay  = nums[1]
+            a_pay  = nums[2]
+        else:
+            # 2-col layout: col0=growth_min, col1=payout (same for Q and A)
+            g_min  = nums[0]
+            q_pay  = nums[1]
+            a_pay  = nums[1]
+
+        if g_min is None:
+            continue
+
+        result_rows.append({
+            "_min":  g_min,
+            "_qpay": q_pay if q_pay is not None else 0.0,
+            "_apay": a_pay if a_pay is not None else 0.0,
+        })
+
+    if not result_rows:
+        return EMPTY
+
+    # ── Build brackets: upper bound = next row lower bound ───────────────────
+    out_rows = []
+    for i, row in enumerate(result_rows):
+        g_min = row["_min"]
+        g_max = result_rows[i+1]["_min"] if i+1 < len(result_rows) else 999999.0
+        q_pay = row["_qpay"]
+        a_pay = row["_apay"]
+
+        # Auto-convert decimal fractions to percent (0.02 → 2.0)
+        # Only convert if value is clearly a fraction (< 0.10)
+        # Values like 0.5, 1.0, 2.0 are already valid percentages
+        if 0 < q_pay < 0.10:
             q_pay = round(q_pay * 100, 4)
-        if 0 < a_pay <= 0.5:
+        if 0 < a_pay < 0.10:
             a_pay = round(a_pay * 100, 4)
 
-        # If growth range looks like a fraction (e.g. 0.30 meaning 30%), convert to %
-        if g_min < 2.0 and g_max <= 1.01 and g_max > 0:
-            g_min = round(g_min * 100, 4)
-            g_max = round(g_max * 100, 4)
-
-        rows_out.append({
+        out_rows.append({
             "Growth Min(%)":       g_min,
             "Growth Max(%)":       g_max,
             "Quarterly Payout(%)": q_pay,
             "Annual Payout(%)":    a_pay,
         })
 
-    if not rows_out:
-        return EMPTY
-
-    result = pd.DataFrame(rows_out)
+    result = pd.DataFrame(out_rows)
     return result[["Growth Min(%)", "Growth Max(%)",
                    "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
 
 
 def _parse_slab_from_df(df):
-    """Legacy helper — delegates to parse_slab logic."""
+    """Legacy stub."""
     return pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
                                   "Quarterly Payout(%)", "Annual Payout(%)"])
+
+
+
+
+
+
 
 
 
@@ -1284,6 +1343,10 @@ class VLDSProcessor:
 
 
 
+
+
+
+
 # app.py | VLDS Pro v2 — Forest Dealerships
 # Canyon #C4622D | Willow #5C7A4E | Summit #3D4F63
 import streamlit as st
@@ -1315,64 +1378,52 @@ def _logo():
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-/* ═══ KILL ALL STREAMLIT CHROME AND SPACING ═══ */
+/* ── Kill all Streamlit chrome ── */
 #MainMenu,footer,header,
 [data-testid="stToolbar"],[data-testid="stDecoration"],
 [data-testid="stStatusWidget"],[data-testid="stSidebarNav"],
 [data-testid="collapsedControl"]
-{display:none!important;height:0!important;min-height:0!important;
- overflow:hidden!important;visibility:hidden!important;}
+{display:none!important;height:0!important;overflow:hidden!important;}
 
-/* Full bleed — zero outer padding everywhere */
+/* ── Full bleed, zero outer padding ── */
 [data-testid="stAppViewContainer"]{background:#F4F5F7;}
 [data-testid="stAppViewBlockContainer"]{
   padding:0!important;max-width:100%!important;width:100%!important;}
 section.main>div.block-container{
-  padding:1.1rem 1.5rem 1rem 1.5rem!important;
+  padding:1.2rem 1.8rem 1rem 1.8rem!important;
   max-width:100%!important;width:100%!important;}
-
-/* Collapse Streamlit's internal gaps to minimum */
-[data-testid="stVerticalBlock"]{gap:0.35rem!important;}
-[data-testid="stHorizontalBlock"]{gap:0.6rem!important;}
-
-/* Kill default element margins */
-div.element-container{margin:0!important;padding:0!important;}
-div.stMarkdown{margin:0!important;padding:0!important;}
-
+[data-testid="stVerticalBlock"]{gap:0.5rem!important;}
+[data-testid="stHorizontalBlock"]{gap:0.8rem!important;}
+div.element-container{margin-bottom:0!important;}
 *{box-sizing:border-box;}
 
-/* ═══ FILE UPLOADER ═══ */
+/* ── File uploader: show only Browse button ── */
 [data-testid="stFileUploader"]{margin:0!important;padding:0!important;}
-[data-testid="stFileUploader"]>div{padding:0!important;margin:0!important;}
+[data-testid="stFileUploader"]>div{padding:0!important;}
 [data-testid="stFileUploaderDropzoneInstructions"]{display:none!important;}
 [data-testid="stFileUploader"] small{display:none!important;}
 [data-testid="stFileUploaderDropzone"]{
-  padding:0!important;margin:0!important;
-  min-height:30px!important;max-height:32px!important;
-  background:transparent!important;border:none!important;
-  overflow:visible!important;}
+  border:none!important;background:transparent!important;
+  padding:0!important;min-height:28px!important;max-height:30px!important;}
 [data-testid="stFileUploaderDropzone"]>div{
-  display:flex!important;align-items:center!important;
-  min-height:28px!important;padding:0!important;}
+  display:flex!important;align-items:center!important;min-height:26px!important;}
 [data-testid="stFileUploader"] button{
-  font-size:.64rem!important;padding:.18rem .75rem!important;
-  height:26px!important;min-height:26px!important;line-height:1.35!important;
-  border-radius:5px!important;white-space:nowrap!important;
-  background:#C4622D!important;color:#fff!important;
-  border:none!important;font-weight:700!important;cursor:pointer!important;
-  display:inline-flex!important;align-items:center!important;
-  opacity:1!important;visibility:visible!important;}
+  background:#C4622D!important;color:#fff!important;border:none!important;
+  border-radius:5px!important;font-size:.63rem!important;font-weight:700!important;
+  padding:.15rem .65rem!important;height:24px!important;min-height:24px!important;
+  cursor:pointer!important;white-space:nowrap!important;
+  display:inline-flex!important;align-items:center!important;}
 [data-testid="stFileUploader"] button:hover{background:#A34E22!important;}
-[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"]{
-  display:none!important;}
+[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"]{display:none!important;}
+[data-testid="stFileUploader"] [data-testid="stFileUploaderDeleteBtn"]{display:none!important;}
 
-/* ═══ TOPBAR ═══ */
+/* ── Topbar ── */
 .topbar{background:linear-gradient(135deg,#3D4F63,#2C3A4A);
-  border-radius:10px;padding:.65rem 1.4rem;margin-bottom:.75rem;
+  border-radius:10px;padding:.65rem 1.4rem;margin-bottom:.8rem;
   display:flex;align-items:center;justify-content:space-between;
   border-left:5px solid #C4622D;}
 .topbar-left{display:flex;align-items:center;gap:.8rem;}
-.logo-box{width:40px;height:40px;border-radius:9px;background:#fff;
+.logo-box{width:40px;height:40px;border-radius:8px;background:#fff;
   display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 .tb-title{color:#fff;font-size:.92rem;font-weight:900;line-height:1.25;}
 .tb-sub{color:rgba(255,255,255,.4);font-size:.6rem;margin-top:2px;}
@@ -1383,41 +1434,32 @@ div.stMarkdown{margin:0!important;padding:0!important;}
 .pill-c{background:rgba(196,98,45,.28);border-color:#C4622D;color:#F5D9CF;}
 .pill-w{background:rgba(92,122,78,.28);border-color:#5C7A4E;color:#C8DBBF;}
 
-/* ═══ SECTION HEADING ═══ */
+/* ── Section label ── */
 .sec-head{font-size:.57rem;font-weight:900;letter-spacing:1.1px;
   text-transform:uppercase;color:#3D4F63;
-  padding-left:.5rem;border-left:3px solid #C4622D;
-  margin:.6rem 0 .35rem;}
+  padding-left:.5rem;border-left:3px solid #C4622D;margin:.5rem 0 .3rem;}
 
-/* ═══ FILE CARD ═══ */
-.fc{background:#fff;border:1.5px solid #D1D5DB;border-radius:9px;
-  padding:.6rem .85rem .5rem;transition:all .15s;}
-.fc.fc-ok  {border-color:#5C7A4E;background:#F2F7F0;}
-.fc.fc-miss{border-color:#C4622D;border-style:dashed;background:#FDF4F1;}
-.fc.fc-warn{border-color:#D97706;background:#FFFBEB;}
-.fc-header{display:flex;align-items:center;gap:.5rem;}
-.fc-icon  {font-size:.88rem;flex-shrink:0;line-height:1;}
-.fc-label {font-size:.7rem;font-weight:800;color:#3D4F63;flex:1;
+/* ── File row ── */
+.frow{display:flex;align-items:center;gap:.7rem;
+  padding:.45rem .7rem;background:#fff;border-radius:8px;
+  border:1px solid #E2E8F0;margin-bottom:.3rem;}
+.frow.ok  {border-color:#5C7A4E;background:#F2F7F0;}
+.frow.warn{border-color:#D97706;background:#FFFBEB;}
+.frow.miss{border-color:#C4622D;border-style:dashed;background:#FDF4F1;}
+.frow-label{font-size:.68rem;font-weight:700;color:#3D4F63;
+  flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.frow-fname{font-size:.6rem;color:#5C7A4E;font-weight:600;flex:1.2;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.badge    {font-size:.51rem;font-weight:800;border-radius:5px;
-  padding:2px 7px;line-height:1.5;flex-shrink:0;}
-.badge-req{background:#FDF4F1;color:#C4622D;border:1px solid #C4622D;}
-.badge-ok {background:#EBF2E8;color:#2D6B21;border:1px solid #5C7A4E;}
-.badge-opt{background:#EEF1F4;color:#3D4F63;border:1px solid #B0BAC7;}
-.badge-wrn{background:#FEF3C7;color:#92400E;border:1px solid #D97706;}
-.fc-fname {font-size:.6rem;font-weight:600;color:#5C7A4E;
-  margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.fc-empty {font-size:.6rem;color:#9CA3AF;font-style:italic;margin-top:3px;}
-.fc-warn-txt{font-size:.58rem;font-weight:600;color:#92400E;
-  background:#FEF3C7;border-radius:4px;padding:2px 7px;margin-top:4px;line-height:1.5;}
+.frow-empty{font-size:.6rem;color:#9CA3AF;flex:1.2;}
+.frow-warn{font-size:.58rem;color:#92400E;flex:1.2;}
 
-/* ═══ CONFIG PANEL ═══ */
-.cfg-panel{background:#fff;border:1.5px solid #D1D5DB;border-radius:9px;
+/* ── Config panel ── */
+.cfg-panel{background:#fff;border:1px solid #E2E8F0;border-radius:9px;
   padding:.8rem 1rem .7rem;margin-bottom:.6rem;}
 .cfg-title{font-size:.54rem;font-weight:900;letter-spacing:.9px;
   text-transform:uppercase;color:#3D4F63;margin-bottom:.5rem;}
 
-/* ═══ WIDGETS ═══ */
+/* ── Widgets ── */
 [data-testid="stSelectbox"]{margin:0!important;}
 [data-testid="stSelectbox"] label{font-size:.62rem!important;font-weight:700!important;
   color:#3D4F63!important;margin-bottom:.04rem!important;}
@@ -1429,12 +1471,11 @@ div.stMarkdown{margin:0!important;padding:0!important;}
 [data-testid="stTextInput"] input{
   min-height:32px!important;font-size:.68rem!important;padding:.18rem .45rem!important;}
 [data-testid="stRadio"]{margin:0!important;}
-[data-testid="stRadio"]>label{font-size:.62rem!important;font-weight:700!important;
-  color:#3D4F63!important;}
+[data-testid="stRadio"]>label{font-size:.62rem!important;font-weight:700!important;color:#3D4F63!important;}
 [data-testid="stRadio"]>div{gap:.4rem!important;margin-top:.06rem!important;}
 [data-testid="stRadio"] label span{font-size:.66rem!important;}
 
-/* ═══ BUTTONS ═══ */
+/* ── Buttons ── */
 div[data-testid="stButton"]>button[kind="primary"]{
   background:linear-gradient(135deg,#C4622D,#A34E22)!important;
   color:#fff!important;border:none!important;border-radius:7px!important;
@@ -1442,7 +1483,7 @@ div[data-testid="stButton"]>button[kind="primary"]{
   padding:.42rem 1rem!important;width:100%!important;}
 div[data-testid="stButton"]>button[kind="primary"]:hover{
   background:linear-gradient(135deg,#A34E22,#7A3A18)!important;}
-div[data-testid="stButton"]>button:disabled{opacity:.2!important;}
+div[data-testid="stButton"]>button:disabled{opacity:.22!important;}
 div[data-testid="stDownloadButton"]>button{
   background:linear-gradient(135deg,#5C7A4E,#3D6B31)!important;
   color:#fff!important;border:none!important;border-radius:7px!important;
@@ -1452,28 +1493,26 @@ div[data-testid="stDownloadButton"]>button:hover{
   background:linear-gradient(135deg,#3D6B31,#2D5024)!important;}
 div[data-testid="stButton"]>button:not([kind="primary"]){
   border-radius:7px!important;font-size:.7rem!important;
-  padding:.38rem .8rem!important;width:100%!important;opacity:.26!important;}
+  padding:.38rem .8rem!important;width:100%!important;opacity:.25!important;}
 
-/* ═══ STATS ═══ */
+/* ── Stats ── */
 .stats-card{background:linear-gradient(135deg,#3D4F63,#2C3A4A);
-  border-radius:9px;padding:.8rem 1.1rem;
-  border-left:4px solid #5C7A4E;margin-top:.35rem;}
+  border-radius:9px;padding:.8rem 1.1rem;border-left:4px solid #5C7A4E;margin-top:.3rem;}
 .stats-row{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;}
 .stat-item .sv{font-size:1.1rem;font-weight:900;line-height:1;}
 .stat-item .sl{font-size:.49rem;color:rgba(255,255,255,.38);
   margin-top:3px;letter-spacing:.5px;text-transform:uppercase;}
 
-/* ═══ INFO BOXES ═══ */
-.info-box{border-radius:7px;padding:.5rem .8rem;font-size:.63rem;
-  line-height:1.6;margin:.3rem 0;}
+/* ── Info boxes ── */
+.info-box{border-radius:7px;padding:.5rem .8rem;font-size:.63rem;line-height:1.6;margin:.3rem 0;}
 .info-box.green{background:#EBF2E8;border:1px solid #5C7A4E;color:#2D6B21;}
 .info-box.orange{background:#FDF4F1;border:1px solid #C4622D;color:#A34E22;}
 
-/* ═══ MISC ═══ */
+/* ── Misc ── */
 [data-testid="stProgress"]{margin:.1rem 0!important;}
 div.stAlert{font-size:.67rem!important;border-radius:7px!important;}
 
-/* ═══ LOGIN ═══ */
+/* ── Login ── */
 .login-wrap{min-height:88vh;display:flex;align-items:center;justify-content:center;}
 .login-card{background:#fff;border:2px solid #C4622D;border-radius:14px;
   padding:2.5rem 2.8rem 2.2rem;width:400px;
@@ -1485,6 +1524,14 @@ div.stAlert{font-size:.67rem!important;border-radius:7px!important;}
 .login-err{background:#FEF2F2;border:1px solid #FECACA;border-radius:7px;
   padding:.45rem .75rem;font-size:.67rem;color:#B91C1C;
   margin-bottom:.8rem;text-align:center;}
+
+/* ── Remove button (small X) ── */
+div[data-testid="stButton"]>button.rm-btn{
+  background:transparent!important;color:#9CA3AF!important;
+  border:1px solid #E2E8F0!important;border-radius:4px!important;
+  font-size:.6rem!important;padding:.1rem .3rem!important;
+  height:22px!important;min-height:0!important;
+  width:auto!important;opacity:1!important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1620,8 +1667,7 @@ with left:
     st.markdown('<div class="sec-head">📂 Input Files</div>', unsafe_allow_html=True)
 
     for key, icon, label, req in FILE_DEFS:
-        # Sync widget state into S.files without rerun
-        wk = f"fu_{key}"
+        wk       = f"fu_{key}"
         up_state = st.session_state.get(wk)
         if up_state is not None and up_state.size <= 209_715_200:
             S.files[key] = up_state
@@ -1632,44 +1678,43 @@ with left:
         warning = S.file_warnings.get(key, "")
         fname   = S.files[key].name if loaded else ""
 
-        # ── Compact row matching sketch: Label | filename | Browse | X ──────
-        # One tight row, no card padding, no descriptions
-        col_lbl, col_up, col_rm = st.columns([3, 2.5, 0.7], gap="small")
+        # ── File row: Label(3) | Browse(1.2) | Remove(0.6) ────────────────
+        # browse and remove are in separate narrow columns so they never overlap
+        c1, c2, c3 = st.columns([3.8, 1.2, 0.6], gap="small")
 
-        with col_lbl:
-            if loaded:
-                color = "#2D6B21" if not warning else "#92400E"
-                st.markdown(
-                    f'<div style="font-size:.68rem;font-weight:700;color:#3D4F63;'
-                    f'padding:.28rem 0 .05rem;">{icon} {label}</div>'
-                    f'<div style="font-size:.58rem;color:{color};font-weight:600;'
-                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
-                    f'max-width:100%;">'
-                    f'{"⚠ "+warning if warning else "✓ "+fname[:40]}'
-                    f'</div>',
-                    unsafe_allow_html=True)
+        with c1:
+            if loaded and warning:
+                row_cls = "frow warn"
+                fn_html = f'<span class="frow-warn">⚠ {warning[:50]}</span>'
+            elif loaded:
+                row_cls = "frow ok"
+                fn_html = f'<span class="frow-fname">✓ {fname[:45]}</span>'
+            elif req:
+                row_cls = "frow miss"
+                fn_html = '<span class="frow-empty">Required — not uploaded</span>'
             else:
-                badge_color = "#C4622D" if req else "#64748B"
-                badge_txt   = "Required" if req else "Optional"
-                st.markdown(
-                    f'<div style="font-size:.68rem;font-weight:700;color:#3D4F63;'
-                    f'padding:.28rem 0 .05rem;">{icon} {label} '
-                    f'<span style="font-size:.5rem;font-weight:800;color:{badge_color};'
-                    f'background:{"#FDF4F1" if req else "#EEF1F4"};'
-                    f'border:1px solid {badge_color};border-radius:4px;padding:1px 5px;">'
-                    f'{badge_txt}</span></div>'
-                    f'<div style="font-size:.58rem;color:#9CA3AF;font-style:italic;">'
-                    f'No file selected</div>',
-                    unsafe_allow_html=True)
+                row_cls = "frow"
+                fn_html = '<span class="frow-empty">Optional</span>'
 
-        with col_up:
+            st.markdown(
+                f'<div class="{row_cls}">'
+                f'<span class="frow-label">{icon} {label}</span>'
+                f'{fn_html}'
+                f'</div>',
+                unsafe_allow_html=True)
+
+        with c2:
+            # Give uploader a bit of top margin so it aligns with the row card
+            st.markdown('<div style="margin-top:.22rem;">', unsafe_allow_html=True)
             up = st.file_uploader("_", type=["xlsx","xls","csv"],
                                    key=wk, label_visibility="collapsed")
+            st.markdown('</div>', unsafe_allow_html=True)
             if up is not None and up.size <= 209_715_200:
                 S.files[key]         = up
                 S.file_warnings[key] = _check_file(key, up)
 
-        with col_rm:
+        with c3:
+            st.markdown('<div style="margin-top:.22rem;">', unsafe_allow_html=True)
             if loaded:
                 if st.button("✕", key=f"rm_{key}", use_container_width=True):
                     del S.files[key]
@@ -1677,11 +1722,7 @@ with left:
                     if wk in st.session_state:
                         del st.session_state[wk]
                     st.rerun()
-
-        # Thin divider between rows
-        st.markdown(
-            '<div style="border-bottom:1px solid #E5E7EB;margin:.1rem 0 .15rem;"></div>',
-            unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
 # ────────────────────────────────────────────────────────────────────────────
 # RIGHT PANEL — Config + Actions
@@ -1898,8 +1939,3 @@ if S.logs:
                         unsafe_allow_html=True)
     elif wc:
         st.warning(f"⚠️ {wc} warning(s) — download the log for details.")
-
-                    
-
-
-            
