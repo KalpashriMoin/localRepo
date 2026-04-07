@@ -1,1 +1,315 @@
 
+# utils.py | VLDS Pro v2 — Forest Dealerships
+import re
+import pandas as pd
+import numpy as np
+
+
+# ── Key normaliser ────────────────────────────────────────────────────────────
+# Excel reads pure integers as floats → str gives "12345.0".
+# _norm_key strips ".0" so cross-file joins always work.
+def _norm_key(v):
+    s = str(v).strip()
+    if re.match(r"^\d+\.0+$", s):
+        s = s.split(".")[0]
+    return s
+
+
+# ── Column finder ─────────────────────────────────────────────────────────────
+def fcol(columns, *hints):
+    """Return the first column name whose lowercase contains any hint."""
+    for h in hints:
+        for c in columns:
+            if h.lower() in str(c).lower():
+                return c
+    return None
+
+
+# ── Normalised string series ──────────────────────────────────────────────────
+def N(s):
+    """Fillna + astype str + strip + upper — for consistent matching."""
+    return s.fillna("").astype(str).str.strip().str.upper()
+
+
+# ── Numeric conversion ────────────────────────────────────────────────────────
+def to_num(s):
+    """Series → float64: strip commas, coerce, NaN→0."""
+    return pd.to_numeric(
+        s.astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce").fillna(0.0)
+
+
+def safe_num(v):
+    """Single value → float, 0.0 on failure."""
+    try:
+        f = float(str(v).replace(",", "").strip())
+        return 0.0 if (pd.isna(f) or np.isinf(f)) else f
+    except Exception:
+        return 0.0
+
+
+# ── Quarter / year from filename ──────────────────────────────────────────────
+def quarter_from_filename(name):
+    m = re.search(r"Q([1-4])", str(name), re.IGNORECASE)
+    return f"Q{m.group(1).upper()}" if m else "Q4"
+
+
+def year_from_filename(name):
+    m = re.search(r"(20\d{2})", str(name))
+    return m.group(1) if m else str(pd.Timestamp.now().year)
+
+
+# ── Smart file reader ─────────────────────────────────────────────────────────
+def read_file(f, sheet_hints=None):
+    """
+    Read an uploaded Excel or CSV file into a clean DataFrame.
+    Handles:
+      - CSV files
+      - Excel files with the data starting anywhere in rows 0-15
+      - Multiple sheets (picks best by row count or sheet_hints)
+    Returns None on failure.
+    """
+    if f is None:
+        return None
+    try:
+        f.seek(0)
+        name = str(getattr(f, "name", "")).lower()
+
+        if name.endswith(".csv"):
+            # Try common encodings
+            for enc in ["utf-8", "latin-1", "cp1252"]:
+                try:
+                    f.seek(0)
+                    df = pd.read_csv(f, dtype=str, encoding=enc)
+                    df.columns = [str(c).strip() for c in df.columns]
+                    return _clean_df(df)
+                except Exception:
+                    continue
+            return None
+
+        # Excel — find best sheet
+        f.seek(0)
+        xl = pd.ExcelFile(f)
+        sheet_names = xl.sheet_names
+
+        # Pick sheet by hints if provided
+        chosen = None
+        if sheet_hints:
+            for hint in sheet_hints:
+                for s in sheet_names:
+                    if hint.lower() in s.lower():
+                        chosen = s
+                        break
+                if chosen:
+                    break
+
+        if not chosen:
+            # Pick sheet with most rows
+            best_n, best_s = -1, sheet_names[0]
+            for s in sheet_names:
+                try:
+                    f.seek(0)
+                    tmp = pd.read_excel(f, sheet_name=s, header=None,
+                                        nrows=5000, dtype=str)
+                    if len(tmp) > best_n:
+                        best_n, best_s = len(tmp), s
+                except Exception:
+                    pass
+            chosen = best_s
+
+        f.seek(0)
+        raw = pd.read_excel(f, sheet_name=chosen, header=None,
+                            nrows=5000, dtype=str)
+
+        # Find header row: row with most non-blank cells
+        best_row, best_score = 0, 0
+        for i, row in raw.iterrows():
+            if i > 15:
+                break
+            score = sum(1 for v in row
+                        if pd.notna(v) and len(str(v).strip()) > 1)
+            if score > best_score:
+                best_score, best_row = score, i
+
+        f.seek(0)
+        df = pd.read_excel(f, sheet_name=chosen, header=int(best_row), dtype=str)
+        df.columns = [str(c).strip() for c in df.columns]
+        return _clean_df(df)
+
+    except Exception:
+        return None
+
+
+def _clean_df(df):
+    """Drop unnamed / fully-blank columns and fully-blank rows."""
+    # Drop columns that are entirely NaN
+    df = df.dropna(axis=1, how="all")
+    # Drop rows that are entirely NaN
+    df = df.dropna(axis=0, how="all")
+    # Rename duplicate column names
+    seen = {}
+    new_cols = []
+    for c in df.columns:
+        if c in seen:
+            seen[c] += 1
+            new_cols.append(f"{c}.{seen[c]}")
+        else:
+            seen[c] = 0
+            new_cols.append(c)
+    df.columns = new_cols
+    df = df.reset_index(drop=True)
+    return df
+
+
+# ── Dynamic exclusion list reader ─────────────────────────────────────────────
+# Reads EVERY row from the uploaded file — fully dynamic, no hardcoded list.
+# The client can add/remove/edit exclusions each quarter just by uploading
+# their updated file. Column matching is by keyword, not exact name.
+def parse_excl(f) -> pd.DataFrame:
+    """
+    Read the Exclusion List file dynamically.
+
+    Accepted column names (matched by keyword):
+      Particulars / Exclusion / Description → text to match in the VLDS
+      Item No / Item Number                 → optional item code (NA = skip)
+      Column / Match Column / Apply To      → which VLDS column to search
+                                              (default: Line Item)
+    """
+    if f is None:
+        return pd.DataFrame(columns=["Particulars", "Item No", "Column"])
+
+    f.seek(0)
+    df = read_file(f)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Particulars", "Item No", "Column"])
+
+    col_map = {}
+    for c in df.columns:
+        cl = str(c).lower().strip()
+        if any(k in cl for k in ["particular", "exclusion", "description",
+                                  "exclude", "item name"]):
+            if "Particulars" not in col_map.values():
+                col_map[c] = "Particulars"
+        elif any(k in cl for k in ["item no", "item number", "itemno", "item_no"]):
+            if "Item No" not in col_map.values():
+                col_map[c] = "Item No"
+        elif any(k in cl for k in ["column", "match", "apply", "field",
+                                    "search in", "where"]):
+            if "Column" not in col_map.values():
+                col_map[c] = "Column"
+
+    df = df.rename(columns=col_map)
+
+    for need, default in [("Particulars", ""), ("Item No", "NA"),
+                           ("Column", "Line Item")]:
+        if need not in df.columns:
+            df[need] = default
+
+    df["Particulars"] = df["Particulars"].fillna("").astype(str).str.strip()
+    df["Item No"]     = df["Item No"].fillna("NA").astype(str).str.strip()
+    df["Column"]      = df["Column"].fillna("Line Item").astype(str).str.strip()
+
+    df = df[df["Particulars"] != ""].copy()
+    return df[["Particulars", "Item No", "Column"]].reset_index(drop=True)
+
+
+# ── Dynamic slab table reader ─────────────────────────────────────────────────
+# Reads every bracket from the uploaded file — fully dynamic.
+# The client can change rates or add/remove brackets each quarter.
+def parse_slab(f) -> pd.DataFrame:
+    """
+    Read the slab file uploaded by the user.
+    Returns a DataFrame with exactly 4 columns:
+        Growth Min(%)  |  Growth Max(%)  |  Quarterly Payout(%)  |  Annual Payout(%)
+
+    Works by reading the raw file row-by-row with NO assumptions,
+    then finding numeric data rows and mapping them positionally.
+    Column order in slab file is expected to be:
+        col0 = Growth Min  |  col1 = Growth Max  |  col2 = Quarterly  |  col3 = Annual
+    """
+    EMPTY = pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
+                                   "Quarterly Payout(%)", "Annual Payout(%)"])
+    if f is None:
+        return EMPTY
+    try:
+        f.seek(0)
+        name = str(getattr(f, "name", "")).lower()
+        # Read everything as strings with no header assumption
+        if name.endswith(".csv"):
+            raw = pd.read_csv(f, header=None, dtype=str)
+        else:
+            f.seek(0)
+            raw = pd.read_excel(f, header=None, dtype=str)
+        f.seek(0)
+    except Exception:
+        return EMPTY
+
+    if raw is None or raw.empty:
+        return EMPTY
+
+    # ── Find data rows: rows where at least 2 cells are numeric ─────────────
+    def _is_numeric(v):
+        try:
+            float(str(v).replace(",","").replace("%","").strip())
+            return True
+        except:
+            return False
+
+    def _to_float(v):
+        try:
+            return float(str(v).replace(",","").replace("%","").strip())
+        except:
+            return None
+
+    data_rows = []
+    for i, row in raw.iterrows():
+        vals = [_to_float(v) for v in row if pd.notna(v) and str(v).strip()]
+        nums = [v for v in vals if v is not None]
+        if len(nums) >= 2:  # at least 2 numeric cells = a data row
+            data_rows.append(nums)
+
+    if not data_rows:
+        return EMPTY
+
+    # ── Build result from positional columns ─────────────────────────────────
+    # Expected order: Growth Min | Growth Max | Quarterly Payout | Annual Payout
+    rows_out = []
+    for nums in data_rows:
+        if len(nums) < 2:
+            continue
+        g_min = nums[0] if len(nums) > 0 else 0.0
+        g_max = nums[1] if len(nums) > 1 else 9999.0
+        q_pay = nums[2] if len(nums) > 2 else 0.0
+        a_pay = nums[3] if len(nums) > 3 else q_pay  # fallback to quarterly if no annual
+
+        # If payout looks like a decimal fraction (e.g. 0.02 meaning 2%), convert to %
+        # Threshold: if value <= 0.5, assume it's a fraction, multiply by 100
+        if 0 < q_pay <= 0.5:
+            q_pay = round(q_pay * 100, 4)
+        if 0 < a_pay <= 0.5:
+            a_pay = round(a_pay * 100, 4)
+
+        # If growth range looks like a fraction (e.g. 0.30 meaning 30%), convert to %
+        if g_min < 2.0 and g_max <= 1.01 and g_max > 0:
+            g_min = round(g_min * 100, 4)
+            g_max = round(g_max * 100, 4)
+
+        rows_out.append({
+            "Growth Min(%)":       g_min,
+            "Growth Max(%)":       g_max,
+            "Quarterly Payout(%)": q_pay,
+            "Annual Payout(%)":    a_pay,
+        })
+
+    if not rows_out:
+        return EMPTY
+
+    result = pd.DataFrame(rows_out)
+    return result[["Growth Min(%)", "Growth Max(%)",
+                   "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
+
+
+def _parse_slab_from_df(df):
+    """Legacy helper — delegates to parse_slab logic."""
+    return pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
+                                  "Quarterly Payout(%)", "Annual Payout(%)"])
