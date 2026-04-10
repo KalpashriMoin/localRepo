@@ -1,1 +1,142 @@
+def parse_slab(f) -> pd.DataFrame:
+    """
+    Read the Slab Table Excel file.
 
+    REQUIRED FORMAT (single header row, NO merged cells):
+
+        Col A                     Col B                          Col C                  Col D
+    Row1: Quarterly Growth %  |  Quarterly Incentive Payout  |  Annual Growth %  |  Annual Incentive Payout
+    Row2: 0                   |  0.50                        |  0                |  0.25
+    Row3: 10                  |  1.00                        |  10               |  0.50
+    ...
+
+    Column A = Quarterly growth lower bound (%)
+    Column B = Quarterly incentive payout (%)
+    Column C = Annual growth lower bound (%)
+    Column D = Annual incentive payout (%)
+
+    Returns DataFrame:
+        Growth Min(%) | Growth Max(%) | Quarterly Payout(%) | Annual Payout(%)
+    """
+    EMPTY = pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
+                                   "Quarterly Payout(%)", "Annual Payout(%)"])
+    if f is None:
+        return EMPTY
+
+    # ── Read with header=0 (single header row, no merges) ─────────────────────
+    try:
+        f.seek(0)
+        fname = str(getattr(f, "name", "")).lower()
+        if fname.endswith(".csv"):
+            df = pd.read_csv(f, dtype=str)
+        else:
+            # Read the sheet with the most rows (handles any sheet name)
+            f.seek(0)
+            xl = pd.ExcelFile(f)
+            best_sheet, best_n = xl.sheet_names[0], -1
+            for s in xl.sheet_names:
+                try:
+                    f.seek(0)
+                    tmp = pd.read_excel(f, sheet_name=s, header=None, nrows=200, dtype=str)
+                    if len(tmp) > best_n:
+                        best_n, best_sheet = len(tmp), s
+                except Exception:
+                    pass
+            f.seek(0)
+            df = pd.read_excel(f, sheet_name=best_sheet, header=0, dtype=str)
+        f.seek(0)
+    except Exception as e:
+        return EMPTY
+
+    if df is None or df.empty:
+        return EMPTY
+
+    # ── Strip whitespace from all column names ─────────────────────────────────
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # ── Detect columns by keyword (case-insensitive) ───────────────────────────
+    # Works for any column name the user chooses as long as it contains
+    # both keywords (e.g. "Quarterly Growth %" matches "quarterly" + "growth")
+    q_growth_col   = None
+    q_payout_col   = None
+    a_growth_col   = None
+    a_payout_col   = None
+
+    for c in df.columns:
+        cl = c.lower()
+        has_q       = "quarterly" in cl or "qtr" in cl or "q " in cl
+        has_a       = "annual" in cl or "ann " in cl or " ann" in cl
+        has_growth  = "growth" in cl or "gr%" in cl or "grow" in cl
+        has_payout  = ("payout" in cl or "incentive" in cl or
+                       "discount" in cl or "pay" in cl)
+
+        if has_q and has_growth and q_growth_col is None:
+            q_growth_col = c
+        elif has_q and has_payout and q_payout_col is None:
+            q_payout_col = c
+        elif has_a and has_growth and a_growth_col is None:
+            a_growth_col = c
+        elif has_a and has_payout and a_payout_col is None:
+            a_payout_col = c
+
+    # ── Fallback: if keyword detection finds nothing, use column positions ─────
+    # This handles edge cases where the user names columns something unexpected
+    if not q_growth_col and len(df.columns) >= 1:
+        q_growth_col = df.columns[0]
+    if not q_payout_col and len(df.columns) >= 2:
+        q_payout_col = df.columns[1]
+    if not a_growth_col and len(df.columns) >= 3:
+        a_growth_col = df.columns[2]
+    if not a_payout_col and len(df.columns) >= 4:
+        a_payout_col = df.columns[3]
+    # If only 2 columns, mirror quarterly as annual
+    if not a_growth_col:
+        a_growth_col = q_growth_col
+    if not a_payout_col:
+        a_payout_col = q_payout_col
+
+    # ── Extract numeric data rows ──────────────────────────────────────────────
+    def _to_float(v):
+        if v is None: return None
+        s = str(v).strip().replace(",", "").replace("%", "").replace("₹", "")
+        if not s or s.lower() in ("nan", "none", "", "-", "n/a"): return None
+        try: return float(s)
+        except: return None
+
+    data_rows = []
+    for _, row in df.iterrows():
+        q_g = _to_float(row.get(q_growth_col))
+        q_p = _to_float(row.get(q_payout_col))
+        a_g = _to_float(row.get(a_growth_col)) if a_growth_col else None
+        a_p = _to_float(row.get(a_payout_col)) if a_payout_col else None
+
+        # Must have quarterly growth AND quarterly payout to be a valid data row
+        if q_g is None or q_p is None:
+            continue
+
+        data_rows.append([
+            q_g,
+            q_p,
+            a_g if a_g is not None else q_g,   # fallback annual = quarterly
+            a_p if a_p is not None else q_p,
+        ])
+
+    if not data_rows:
+        return EMPTY
+
+    # ── Sort by growth ascending and build bracket table ───────────────────────
+    data_rows.sort(key=lambda r: r[0])
+
+    out = []
+    for i, row in enumerate(data_rows):
+        g_max = data_rows[i + 1][0] if i + 1 < len(data_rows) else 999999.0
+        out.append({
+            "Growth Min(%)":       row[0],
+            "Growth Max(%)":       g_max,
+            "Quarterly Payout(%)": row[1],
+            "Annual Payout(%)":    row[3],
+        })
+
+    result = pd.DataFrame(out)
+    return result[["Growth Min(%)", "Growth Max(%)",
+                   "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
