@@ -217,9 +217,24 @@ def parse_excl(f) -> pd.DataFrame:
 # The client can change rates or add/remove brackets each quarter.
 def parse_slab(f) -> pd.DataFrame:
     """
-    Read slab file. Tries every possible reading method until data is found.
-    Your format: Row0=Quarterly/Annual merged, Row1=Growth%/Incentive Payout, Row2+=data
-    OR simpler format: Row0=headers, Row1+=data
+    Read slab file dynamically.
+
+    Handles growth values stored as text ranges:
+        "20% to 22%"  → lower bound = 20
+        "Above 30%"   → lower bound = 30
+        "0% to 10%"   → lower bound = 0
+        "30"          → 30
+
+    Your file structure (4 columns):
+        Col A: Quarterly Growth %  (text range like "20% to 22%")
+        Col B: Quarterly Incentive Payout  (like "0.50%" or 0.5)
+        Col C: Annual Growth %     (text range)
+        Col D: Annual Incentive Payout
+
+    OR simpler (2 or 3 columns):
+        Col A: Growth % range
+        Col B: Quarterly Payout
+        Col C: Annual Payout (optional)
     """
     EMPTY = pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
                                    "Quarterly Payout(%)", "Annual Payout(%)"])
@@ -228,708 +243,119 @@ def parse_slab(f) -> pd.DataFrame:
 
     fname = str(getattr(f, "name", "")).lower()
 
-    def _to_float(v):
-        if v is None: return None
-        s = str(v).strip().replace(",","").replace("%","").strip()
-        if not s or s.lower() in ("nan","none","","-","#"): return None
-        try: return float(s)
-        except: return None
-
-    def _extract_data(raw_df):
-        """Given a raw DataFrame (all strings, no header), find data rows."""
-        rows = []
-        for _, row in raw_df.iterrows():
-            cells = [row.iloc[j] if j < len(row) else None for j in range(min(8, len(row)))]
-            nums = [_to_float(c) for c in cells]
-            valid = [(i, n) for i, n in enumerate(nums) if n is not None]
-            if len(valid) >= 2:
-                rows.append(nums)
-        return rows
-
-    # Try reading the file multiple ways
-    attempts = []
-    for hdr in [None, 0, 1, [0,1]]:
-        try:
+    # ── Read raw, no header ───────────────────────────────────────────────────
+    try:
+        f.seek(0)
+        if fname.endswith(".csv"):
+            raw = pd.read_csv(f, header=None, dtype=str)
+        else:
             f.seek(0)
-            if fname.endswith(".csv"):
-                df = pd.read_csv(f, header=hdr, dtype=str)
-            else:
-                f.seek(0)
-                df = pd.read_excel(f, header=hdr, dtype=str)
-            f.seek(0)
-            # Reset to raw representation
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [" ".join(str(x) for x in col if "unnamed" not in str(x).lower())
-                               for col in df.columns]
-            df = df.reset_index(drop=True)
-            attempts.append(df)
-        except Exception:
-            f.seek(0)
-
-    # Pick the attempt that gives the most numeric data rows
-    best_raw = None
-    best_count = 0
-    for df in attempts:
-        # Treat as raw: reset columns to integers
-        df2 = df.copy()
-        df2.columns = range(len(df2.columns))
-        rows = _extract_data(df2)
-        if len(rows) > best_count:
-            best_count = len(rows)
-            best_raw = rows
-
-    if not best_raw:
+            raw = pd.read_excel(f, header=None, dtype=str)
+        f.seek(0)
+    except Exception:
         return EMPTY
 
-    # Now interpret the numeric rows
-    # Figure out column layout from number of values per row
-    max_vals = max(sum(1 for v in row if v is not None) for row in best_raw)
+    if raw is None or raw.empty:
+        return EMPTY
 
+    def _extract_lower(v):
+        """
+        Extract the lower bound number from a cell.
+        Handles:  "20% to 22%" → 20
+                  "Above 30%"  → 30
+                  "0-10%"      → 0
+                  "0.5%"       → 0.5
+                  "2.0"        → 2.0
+                  30           → 30
+        """
+        if v is None: return None
+        s = str(v).strip().replace(",", "")
+        if not s or s.lower() in ("nan", "none", "", "-"): return None
+
+        # Strip leading text keywords
+        for kw in ["above ", "over ", "more than ", "greater than ",
+                   "upto ", "up to ", "below ", "less than ",
+                   ">=", "<=", ">", "<"]:
+            if s.lower().startswith(kw):
+                s = s[len(kw):].strip()
+                break
+
+        # Remove % signs
+        s = s.replace("%", "").strip()
+
+        # Handle ranges: "20 to 22", "20-22", "20 – 22"
+        for sep in [" to ", " - ", "-", "–", "—", "~", " ~ "]:
+            if sep in s:
+                parts = s.split(sep)
+                s = parts[0].strip()  # take lower bound
+                break
+
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def _extract_payout(v):
+        """Extract payout percentage. Handles '0.50%', '2.0', '0.02' etc."""
+        if v is None: return None
+        s = str(v).strip().replace(",", "").replace("%", "").strip()
+        if not s or s.lower() in ("nan", "none", "", "-"): return None
+        try:
+            val = float(s)
+            # If stored as decimal fraction (0.02 means 2%), convert
+            if 0 < val < 0.1:
+                val = round(val * 100, 4)
+            return val
+        except Exception:
+            return None
+
+    # ── Scan every row ────────────────────────────────────────────────────────
     data_rows = []
-    for row in best_raw:
-        while len(row) < 4:
-            row.append(None)
-        if max_vals >= 4:
-            # Col0=Q growth, Col1=Q payout, Col2=A growth, Col3=A payout
-            q_g = row[0]; q_p = row[1]; a_p = row[3]
-        elif max_vals == 3:
-            # Col0=growth, Col1=Q payout, Col2=A payout
-            q_g = row[0]; q_p = row[1]; a_p = row[2]
-        else:
-            # Col0=growth, Col1=payout (same for both)
-            q_g = row[0]; q_p = row[1]; a_p = row[1]
+    for _, row in raw.iterrows():
+        # Get up to 4 cells
+        cells = [row.iloc[j] if j < len(row) else None for j in range(min(4, len(row)))]
 
-        if q_g is None or q_p is None: continue
-        data_rows.append({"g": float(q_g), "q": float(q_p),
-                           "a": float(a_p) if a_p is not None else float(q_p)})
+        col0 = _extract_lower(cells[0])   # Q growth lower bound
+        col1 = _extract_payout(cells[1]) if len(cells) > 1 else None  # Q payout
+        col2 = _extract_lower(cells[2])  if len(cells) > 2 else None  # A growth lower
+        col3 = _extract_payout(cells[3]) if len(cells) > 3 else None  # A payout
+
+        # Need at least growth lower bound + one payout
+        if col0 is not None and col1 is not None:
+            data_rows.append({
+                "g_min": col0,
+                "q_pay": col1,
+                "a_pay": col3 if col3 is not None else col1,
+            })
+        elif col0 is None and col2 is not None and col3 is not None:
+            # Maybe annual is in first two numeric slots
+            data_rows.append({
+                "g_min": col2,
+                "q_pay": col3,
+                "a_pay": col3,
+            })
 
     if not data_rows:
         return EMPTY
 
-    data_rows.sort(key=lambda r: r["g"])
+    # Sort by growth ascending
+    data_rows.sort(key=lambda r: r["g_min"])
 
+    # Build brackets: upper bound = next row lower bound; last = 999999
     out = []
     for i, row in enumerate(data_rows):
-        g_max = data_rows[i+1]["g"] if i+1 < len(data_rows) else 999999.0
+        g_max = data_rows[i+1]["g_min"] if i+1 < len(data_rows) else 999999.0
         out.append({
-            "Growth Min(%)":       row["g"],
+            "Growth Min(%)":       row["g_min"],
             "Growth Max(%)":       g_max,
-            "Quarterly Payout(%)": row["q"],
-            "Annual Payout(%)":    row["a"],
+            "Quarterly Payout(%)": row["q_pay"],
+            "Annual Payout(%)":    row["a_pay"],
         })
 
-    result = pd.DataFrame(out)
-    return result[["Growth Min(%)", "Growth Max(%)",
-                   "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
+    return pd.DataFrame(out)[["Growth Min(%)", "Growth Max(%)",
+                               "Quarterly Payout(%)", "Annual Payout(%)"]].copy()
 
 
 def _parse_slab_from_df(df):
     return pd.DataFrame(columns=["Growth Min(%)", "Growth Max(%)",
                                   "Quarterly Payout(%)", "Annual Payout(%)"])
-
-
-
-
-
-
-
-
-
-
-# app.py | VLDS Pro v2 — Forest Dealerships
-# Canyon #C4622D | Willow #5C7A4E | Summit #3D4F63
-import streamlit as st
-import pandas as pd
-import traceback, base64, os, re
-
-from auth      import verify_login
-from utils     import parse_excl, parse_slab, read_file
-from processor import VLDSProcessor
-
-# ── Version ────────────────────────────────────────────────────────────────────
-APP_VERSION = "v2.1.0"  # ← bump this when you deploy a fix
-
-# ── Footer text ───────────────────────────────────────────────────────────────
-FOOTER_TEXT = ""  # ← paste your footer text here
-
-st.set_page_config(
-    page_title=f"VLDS Pro {APP_VERSION} — Forest Dealerships",
-    page_icon="🏭", layout="wide",
-    initial_sidebar_state="collapsed")
-
-LOGO_PATH = ""  # ← set your logo path e.g. "assets/logo.png"
-
-def _logo():
-    if LOGO_PATH and os.path.exists(LOGO_PATH):
-        ext  = LOGO_PATH.rsplit(".",1)[-1].lower()
-        mime = {"png":"image/png","jpg":"image/jpeg",
-                "jpeg":"image/jpeg","svg":"image/svg+xml"}.get(ext,"image/png")
-        b64  = base64.b64encode(open(LOGO_PATH,"rb").read()).decode()
-        return f'<img src="data:{mime};base64,{b64}" style="height:34px;width:auto;">'
-    return '<span style="font-size:1.1rem;font-weight:900;color:#C4622D;">FD</span>'
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CSS
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<style>
-/* ── Kill all Streamlit chrome ── */
-#MainMenu,footer,header,
-[data-testid="stToolbar"],[data-testid="stDecoration"],
-[data-testid="stStatusWidget"],[data-testid="stSidebarNav"],
-[data-testid="collapsedControl"]
-{display:none!important;height:0!important;min-height:0!important;
- overflow:hidden!important;visibility:hidden!important;}
-
-/* ── Zero outer padding — full bleed ── */
-[data-testid="stAppViewContainer"]{background:#F4F5F7;}
-[data-testid="stAppViewBlockContainer"]{
-  padding:0!important;max-width:100%!important;width:100%!important;}
-section.main>div.block-container{
-  padding:1rem 1.4rem 0.8rem!important;
-  max-width:100%!important;width:100%!important;}
-[data-testid="stVerticalBlock"]{gap:0.28rem!important;}
-[data-testid="stHorizontalBlock"]{gap:0.5rem!important;}
-div.element-container{margin:0!important;padding:0!important;}
-div.stMarkdown{margin:0!important;padding:0!important;}
-*{box-sizing:border-box;}
-
-/* ── File uploader: Browse button only ── */
-[data-testid="stFileUploader"]{margin:0!important;padding:0!important;}
-[data-testid="stFileUploader"]>div{padding:0!important;margin:0!important;}
-[data-testid="stFileUploaderDropzoneInstructions"]{display:none!important;}
-[data-testid="stFileUploader"] small{display:none!important;}
-[data-testid="stFileUploaderDropzone"]{
-  padding:0!important;margin:0!important;border:none!important;
-  background:transparent!important;min-height:28px!important;
-  max-height:30px!important;overflow:visible!important;}
-[data-testid="stFileUploaderDropzone"]>div{
-  display:flex!important;align-items:center!important;
-  min-height:26px!important;padding:0!important;margin:0!important;}
-[data-testid="stFileUploader"] button{
-  font-size:.62rem!important;padding:.14rem .65rem!important;
-  height:26px!important;min-height:26px!important;line-height:1.3!important;
-  border-radius:5px!important;white-space:nowrap!important;
-  background:#C4622D!important;color:#fff!important;
-  border:none!important;font-weight:700!important;cursor:pointer!important;
-  display:inline-flex!important;align-items:center!important;
-  visibility:visible!important;opacity:1!important;}
-[data-testid="stFileUploader"] button:hover{background:#A34E22!important;}
-[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"]{
-  display:none!important;}
-
-/* ── Topbar ── */
-.topbar{background:linear-gradient(135deg,#3D4F63,#2C3A4A);
-  border-radius:10px;padding:.6rem 1.3rem;margin-bottom:.7rem;
-  display:flex;align-items:center;justify-content:space-between;
-  border-left:5px solid #C4622D;}
-.topbar-left{display:flex;align-items:center;gap:.75rem;}
-.logo-box{width:40px;height:40px;border-radius:9px;background:#fff;
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-.tb-title{color:#fff;font-size:.9rem;font-weight:900;line-height:1.25;}
-.tb-sub{color:rgba(255,255,255,.38);font-size:.58rem;margin-top:2px;}
-.topbar-right{display:flex;gap:.4rem;align-items:center;}
-.pill{padding:3px 11px;border-radius:20px;font-size:.56rem;font-weight:700;
-  border:1px solid rgba(255,255,255,.18);color:rgba(255,255,255,.88);
-  background:rgba(255,255,255,.1);white-space:nowrap;}
-.pill-c{background:rgba(196,98,45,.28);border-color:#C4622D;color:#F5D9CF;}
-.pill-w{background:rgba(92,122,78,.28);border-color:#5C7A4E;color:#C8DBBF;}
-.pill-v{background:rgba(99,102,241,.18);border-color:rgba(99,102,241,.4);color:#C7D2FE;}
-
-/* ── Section heading ── */
-.sec-head{font-size:.56rem;font-weight:900;letter-spacing:1px;
-  text-transform:uppercase;color:#3D4F63;
-  padding-left:.5rem;border-left:3px solid #C4622D;
-  margin:.55rem 0 .32rem;}
-
-/* ── File row ── */
-.frow{display:flex;align-items:center;gap:.5rem;
-  padding:.28rem .1rem;
-  border-bottom:1px solid #EAECF0;}
-.frow:last-child{border-bottom:none;}
-.frow-label{font-size:.68rem;font-weight:700;color:#3D4F63;
-  white-space:nowrap;min-width:160px;}
-.frow-file{font-size:.6rem;flex:1;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.frow-file.loaded{color:#2D6B21;font-weight:600;}
-.frow-file.empty{color:#9CA3AF;font-style:italic;}
-.frow-file.warn{color:#92400E;font-weight:600;}
-
-/* ── Config panel ── */
-.cfg-panel{background:#fff;border:1.5px solid #D9DCE3;border-radius:9px;
-  padding:.75rem 1rem .65rem;margin-bottom:.5rem;}
-.cfg-title{font-size:.53rem;font-weight:900;letter-spacing:.9px;
-  text-transform:uppercase;color:#3D4F63;margin-bottom:.45rem;}
-
-/* ── Widgets ── */
-[data-testid="stSelectbox"]{margin:0!important;}
-[data-testid="stSelectbox"] label{font-size:.62rem!important;font-weight:700!important;
-  color:#3D4F63!important;margin-bottom:.03rem!important;}
-[data-testid="stSelectbox"] [data-baseweb="select"]>div{
-  min-height:30px!important;font-size:.67rem!important;}
-[data-testid="stTextInput"]{margin:0!important;}
-[data-testid="stTextInput"] label{font-size:.62rem!important;font-weight:700!important;
-  color:#3D4F63!important;margin-bottom:.03rem!important;}
-[data-testid="stTextInput"] input{
-  min-height:30px!important;font-size:.67rem!important;padding:.16rem .4rem!important;}
-[data-testid="stRadio"]{margin:0!important;}
-[data-testid="stRadio"]>label{font-size:.62rem!important;font-weight:700!important;
-  color:#3D4F63!important;}
-[data-testid="stRadio"]>div{gap:.4rem!important;margin-top:.06rem!important;}
-[data-testid="stRadio"] label span{font-size:.65rem!important;}
-
-/* ── Action buttons ── */
-div[data-testid="stButton"]>button[kind="primary"]{
-  background:linear-gradient(135deg,#C4622D,#A34E22)!important;
-  color:#fff!important;border:none!important;border-radius:7px!important;
-  font-weight:900!important;font-size:.72rem!important;
-  padding:.4rem .9rem!important;width:100%!important;}
-div[data-testid="stButton"]>button[kind="primary"]:hover{
-  background:linear-gradient(135deg,#A34E22,#7A3A18)!important;}
-div[data-testid="stButton"]>button:disabled{opacity:.22!important;}
-div[data-testid="stButton"]>button:not([kind="primary"]){
-  border-radius:7px!important;font-size:.67rem!important;
-  padding:.32rem .7rem!important;width:100%!important;opacity:.3!important;}
-div[data-testid="stDownloadButton"]>button{
-  background:linear-gradient(135deg,#5C7A4E,#3D6B31)!important;
-  color:#fff!important;border:none!important;border-radius:7px!important;
-  font-weight:700!important;font-size:.68rem!important;
-  padding:.35rem .7rem!important;width:100%!important;}
-div[data-testid="stDownloadButton"]>button:hover{
-  background:linear-gradient(135deg,#3D6B31,#2D5024)!important;}
-
-/* ── Stats card ── */
-.stats-card{background:linear-gradient(135deg,#3D4F63,#2C3A4A);
-  border-radius:9px;padding:.75rem 1.1rem;
-  border-left:4px solid #5C7A4E;margin-top:.35rem;}
-.stats-row{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;}
-.stat-item .sv{font-size:1.1rem;font-weight:900;line-height:1;}
-.stat-item .sl{font-size:.48rem;color:rgba(255,255,255,.38);
-  margin-top:3px;letter-spacing:.5px;text-transform:uppercase;}
-
-/* ── Info box ── */
-.info-box{border-radius:7px;padding:.45rem .8rem;font-size:.62rem;
-  line-height:1.6;margin:.25rem 0;}
-.info-box.green{background:#EBF2E8;border:1px solid #5C7A4E;color:#2D6B21;}
-.info-box.orange{background:#FDF4F1;border:1px solid #C4622D;color:#A34E22;}
-
-/* ── Footer ── */
-.app-footer{margin-top:.9rem;padding:.5rem 0 .2rem;
-  border-top:1px solid #E2E8F0;text-align:center;
-  font-size:.57rem;color:#94A3B8;line-height:1.6;}
-
-/* ── Login ── */
-.login-wrap{min-height:88vh;display:flex;align-items:center;justify-content:center;}
-.login-card{background:#fff;border:2px solid #C4622D;border-radius:14px;
-  padding:2.4rem 2.7rem 2rem;width:400px;
-  box-shadow:0 8px 32px rgba(196,98,45,.12);}
-.login-title{font-size:1.15rem;font-weight:900;color:#3D4F63;
-  text-align:center;margin-bottom:.3rem;}
-.login-sub{font-size:.68rem;color:#5C7A4E;font-weight:600;
-  text-align:center;margin-bottom:1.4rem;}
-.login-err{background:#FEF2F2;border:1px solid #FECACA;border-radius:7px;
-  padding:.45rem .75rem;font-size:.67rem;color:#B91C1C;
-  margin-bottom:.8rem;text-align:center;}
-
-/* ── Misc ── */
-[data-testid="stProgress"]{margin:.1rem 0!important;}
-div.stAlert{font-size:.67rem!important;border-radius:7px!important;}
-</style>
-""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Session state
-# ══════════════════════════════════════════════════════════════════════════════
-for k, v in {
-    "authenticated": False, "username": "", "login_error": "",
-    "files": {}, "file_warnings": {},
-    "result": None, "logs": [], "stats": {},
-    "log_txt": "", "year_custom": "",
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-S = st.session_state
-
-# ══════════════════════════════════════════════════════════════════════════════
-# File validation (filename keywords only — fast, no file reading)
-# ══════════════════════════════════════════════════════════════════════════════
-SLOT_KW = {
-    "vlds_main":   ["vlds main","vlds-main","vlds_main","4s main","cmi"],
-    "df_recd":     ["df recd","dfrecd","df&recd","df_recd","discount factor"],
-    "prev_year":   ["previous year","prev year","q4-24","q4-23","last year","summary 24","summary 23"],
-    "dealer_list": ["dealer list","dealer_list","4s dealer","dealer master"],
-    "excl_file":   ["exclusion list","excl list","exclusion_list","exclusion"],
-    "slab_file":   ["slab table","slab_table","payout slab","incentive slab","slab"],
-    "base_data":   ["base data","base_data","reference data"],
-}
-SLOT_NAMES = {
-    "vlds_main":"VLDS Main", "df_recd":"DF & RECD",
-    "prev_year":"Previous Year", "dealer_list":"Dealer List",
-    "excl_file":"Exclusion List", "slab_file":"Slab Table", "base_data":"Base Data",
-}
-
-def _check(key, f):
-    if f is None: return ""
-    fname = f.name.lower().replace("_"," ").replace("-"," ")
-    scores = {s: sum(1 for kw in kws if kw in fname)
-              for s, kws in SLOT_KW.items()}
-    best = max(scores, key=lambda s: scores[s])
-    if scores[best] >= 1 and best != key and scores[best] > scores[key]:
-        return f"Looks like '{SLOT_NAMES[best]}' — verify"
-    return ""
-
-# ══════════════════════════════════════════════════════════════════════════════
-# LOGIN
-# ══════════════════════════════════════════════════════════════════════════════
-if not S.authenticated:
-    st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
-    _, mid, _ = st.columns([1, 1.1, 1])
-    with mid:
-        st.markdown(f"""
-        <div class="login-card">
-          <div style="text-align:center;margin-bottom:1.3rem;">{_logo()}</div>
-          <div class="login-title">VLDS Incentive Processor</div>
-          <div class="login-sub">Forest Dealerships · {APP_VERSION} · Sign in</div>
-          {"<div class='login-err'>⚠ "+S.login_error+"</div>" if S.login_error else ""}
-        </div>""", unsafe_allow_html=True)
-        u = st.text_input("Username", placeholder="Enter your username", key="li_u")
-        p = st.text_input("Password", type="password",
-                           placeholder="Enter your password", key="li_p")
-        if st.button("Sign In →", type="primary", use_container_width=True):
-            if not u or not p:
-                S.login_error = "Please enter both username and password."; st.rerun()
-            elif verify_login(u, p):
-                S.authenticated = True; S.username = u.strip().lower()
-                S.login_error = ""; st.rerun()
-            else:
-                S.login_error = "Invalid username or password."; st.rerun()
-        st.markdown("""<div style="font-size:.58rem;color:#94A3B8;text-align:center;
-          margin-top:.9rem;line-height:1.7;">
-          Access restricted to authorised users.<br>
-          Contact your administrator for access.</div>""", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.stop()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TOPBAR
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown(f"""
-<div class="topbar">
-  <div class="topbar-left">
-    <div class="logo-box">{_logo()}</div>
-    <div>
-      <div class="tb-title">VLDS Incentive Processor</div>
-      <div class="tb-sub">Forest Dealerships · 4S Dealer Eligibility &amp; Quarterly Payout</div>
-    </div>
-  </div>
-  <div class="topbar-right">
-    <span class="pill pill-c">VLDS Pro</span>
-    <span class="pill pill-w">Forest Dealerships</span>
-    <span class="pill pill-v">{APP_VERSION}</span>
-    <span class="pill">👤 {S.username}</span>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FILE DEFS
-# ══════════════════════════════════════════════════════════════════════════════
-FILE_DEFS = [
-    ("vlds_main",   "📊", "VLDS Main File",        True),
-    ("df_recd",     "🔗", "DF & RECD File",         True),
-    ("prev_year",   "📅", "Previous Year Summary",  True),
-    ("dealer_list", "🏪", "4S Dealer List",         True),
-    ("excl_file",   "📋", "Exclusion List",         True),
-    ("slab_file",   "📈", "Slab Table",             True),
-    ("base_data",   "🗂️", "Base Data",              False),
-]
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN LAYOUT
-# ══════════════════════════════════════════════════════════════════════════════
-left, right = st.columns([11, 9], gap="large")
-
-# ── LEFT: File pickers ─────────────────────────────────────────────────────────
-with left:
-    st.markdown('<div class="sec-head">📂 Input Files</div>', unsafe_allow_html=True)
-
-    for key, icon, label, req in FILE_DEFS:
-        # Sync widget state → S.files (no rerun needed)
-        wk = f"fu_{key}"
-        ws = st.session_state.get(wk)
-        if ws is not None and ws.size <= 209_715_200:
-            S.files[key] = ws
-            if key not in S.file_warnings:
-                S.file_warnings[key] = _check(key, ws)
-
-        loaded  = key in S.files
-        warning = S.file_warnings.get(key, "")
-        fname   = S.files[key].name if loaded else ""
-
-        # Row: Icon+Label | filename status | Browse | ✕
-        c_lbl, c_file, c_btn, c_rm = st.columns([2.8, 3.5, 1.2, 0.6], gap="small")
-
-        with c_lbl:
-            req_badge = (f' <span style="font-size:.48rem;font-weight:800;'
-                         f'color:{"#C4622D" if req else "#64748B"};'
-                         f'background:{"#FDF4F1" if req else "#F1F5F9"};'
-                         f'border:1px solid {"#C4622D" if req else "#CBD5E1"};'
-                         f'border-radius:3px;padding:1px 5px;">'
-                         f'{"REQ" if req else "OPT"}</span>')
-            st.markdown(
-                f'<div style="font-size:.68rem;font-weight:700;color:#3D4F63;'
-                f'padding:.3rem 0 .28rem;line-height:1.2;">'
-                f'{icon} {label}{req_badge}</div>',
-                unsafe_allow_html=True)
-
-        with c_file:
-            if loaded and not warning:
-                st.markdown(
-                    f'<div style="font-size:.6rem;font-weight:600;color:#2D6B21;'
-                    f'padding:.32rem 0;white-space:nowrap;overflow:hidden;'
-                    f'text-overflow:ellipsis;">✓ {fname[:45]}</div>',
-                    unsafe_allow_html=True)
-            elif loaded and warning:
-                st.markdown(
-                    f'<div style="font-size:.6rem;font-weight:600;color:#92400E;'
-                    f'padding:.32rem 0;">⚠ {fname[:30]} — {warning}</div>',
-                    unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    '<div style="font-size:.6rem;color:#9CA3AF;font-style:italic;'
-                    'padding:.32rem 0;">No file selected</div>',
-                    unsafe_allow_html=True)
-
-        with c_btn:
-            up = st.file_uploader("_", type=["xlsx","xls","csv"],
-                                   key=wk, label_visibility="collapsed")
-            if up is not None and up.size <= 209_715_200:
-                S.files[key]          = up
-                S.file_warnings[key]  = _check(key, up)
-
-        with c_rm:
-            if loaded:
-                if st.button("✕", key=f"rm_{key}", use_container_width=True):
-                    del S.files[key]
-                    S.file_warnings.pop(key, None)
-                    if wk in st.session_state:
-                        del st.session_state[wk]
-                    st.rerun()
-
-# ── RIGHT: Config + Actions ────────────────────────────────────────────────────
-with right:
-    st.markdown('<div class="sec-head">⚙️ Report Settings</div>', unsafe_allow_html=True)
-    st.markdown('<div class="cfg-panel"><div class="cfg-title">Quarter · Year · Payout Type</div>',
-                unsafe_allow_html=True)
-
-    r1, r2 = st.columns(2, gap="small")
-    with r1: quarter_sel = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4"], index=3, key="sel_q")
-    with r2: year_drop   = st.selectbox("Year", list(range(2022, 2033)), index=3, key="sel_y")
-
-    yc = st.text_input("Custom Year (overrides dropdown)",
-                        value=S.year_custom, placeholder="e.g. 2026", key="sel_yc")
-    S.year_custom = yc.strip()
-    year_sel = (int(S.year_custom)
-                if S.year_custom and re.match(r"^20\d{2}$", S.year_custom)
-                else year_drop)
-
-    slab_type = st.radio("Payout Type", ["Quarterly", "Annual"],
-                          horizontal=True, index=0, key="slab_r")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ── Prev year auto-detect ────────────────────────────────────────────────
-    _auto_jc, _auto_ac = None, None
-    if "prev_year" in S.files:
-        try:
-            pf = S.files["prev_year"]; pf.seek(0)
-            _raw2 = (pd.read_csv(pf, nrows=3, dtype=str)
-                     if pf.name.lower().endswith(".csv")
-                     else pd.read_excel(pf, nrows=3, dtype=str))
-            pf.seek(0)
-            _cols = [str(c).strip() for c in _raw2.columns
-                     if not (isinstance(c, float) and pd.isna(c)) and str(c).strip()]
-            for c in _cols:
-                if any(k in c.lower() for k in
-                       ["customer number","customer account","dealer number","dealer no"]):
-                    _auto_jc = c; break
-            if not _auto_jc and _cols: _auto_jc = _cols[0]
-            for c in _cols:
-                if any(k in c.lower() for k in ["final amount","grand total"]):
-                    _auto_ac = c; break
-            if not _auto_ac:
-                for c in _cols:
-                    if any(k in c.lower() for k in ["amount","total","sales","q4","q3"]):
-                        _auto_ac = c; break
-            if not _auto_ac and len(_cols) > 2: _auto_ac = _cols[-1]
-        except Exception:
-            pass
-        if _auto_jc and _auto_ac:
-            st.markdown(
-                f'<div class="info-box green">'
-                f'<b>Previous Year auto-detected:</b><br>'
-                f'ID col → <code>{_auto_jc}</code><br>'
-                f'Amount col → <code>{_auto_ac}</code></div>',
-                unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div class="info-box orange">⚠ Could not detect columns '
-                'from Previous Year file.</div>', unsafe_allow_html=True)
-
-    # ── Actions ──────────────────────────────────────────────────────────────
-    st.markdown('<div class="sec-head" style="margin-top:.5rem;">▶ Actions</div>',
-                unsafe_allow_html=True)
-
-    req_keys  = ["vlds_main","df_recd","prev_year","dealer_list","excl_file","slab_file"]
-    all_ready = all(k in S.files for k in req_keys)
-    qtr_lbl   = f"{quarter_sel}-{str(year_sel)[-2:]}"
-
-    run_btn = st.button(f"🚀  Run {qtr_lbl}", type="primary",
-                         disabled=not all_ready, use_container_width=True)
-
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    d1, d2 = st.columns(2, gap="small")
-    with d1:
-        if S.result:
-            st.download_button("📥 Report", data=S.result,
-                file_name=f"VLDS_{quarter_sel}_{year_sel}_Report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
-        else:
-            st.button("📥 Report", disabled=True, use_container_width=True)
-    with d2:
-        if S.log_txt:
-            st.download_button("📋 Log", data=S.log_txt,
-                file_name=f"VLDS_{quarter_sel}_{year_sel}_Log.txt",
-                mime="text/plain", use_container_width=True)
-        else:
-            st.button("📋 Log", disabled=True, use_container_width=True)
-
-    st.markdown("<div style='height:.35rem'></div>", unsafe_allow_html=True)
-
-    if not all_ready:
-        missing = [n for k,_,n,r in FILE_DEFS if r and k not in S.files]
-        st.warning(f"Awaiting: {' · '.join(missing)}")
-    elif S.result:
-        s = S.stats
-        st.markdown(f"""
-        <div class="stats-card">
-          <div class="stats-row">
-            <div class="stat-item">
-              <div class="sv" style="color:#93C5FD">{s.get("total",0):,}</div>
-              <div class="sl">Total Rows</div>
-            </div>
-            <div class="stat-item">
-              <div class="sv" style="color:#86EFAC">{s.get("eligible",0):,}</div>
-              <div class="sl">Eligible</div>
-            </div>
-            <div class="stat-item">
-              <div class="sv" style="color:#FCA5A5">{s.get("excluded",0):,}</div>
-              <div class="sl">Excluded</div>
-            </div>
-            <div class="stat-item">
-              <div class="sv" style="color:#FCD34D">₹{s.get("sales_cr",0):,.1f} Cr</div>
-              <div class="sl">Eligible Sales</div>
-            </div>
-          </div>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.success("✓ All files ready — click Run")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PROCESSING
-# ══════════════════════════════════════════════════════════════════════════════
-if run_btn:
-    S.result = None; S.logs = []; S.stats = {}; S.log_txt = ""
-    prog = st.progress(0, text="Initialising …")
-    lbl  = st.empty()
-
-    def cb(pct, msg):
-        prog.progress(pct, text=msg)
-        lbl.markdown(
-            f'<div style="font-size:.65rem;color:#5C7A4E;margin:.06rem 0;">'
-            f'⚙️ {msg}</div>', unsafe_allow_html=True)
-
-    try:
-        excl = parse_excl(S.files["excl_file"])
-
-        # ── Read slab and show exactly what was read ──────────────────────────
-        slab_f = S.files["slab_file"]
-        slab_f.seek(0)
-        slab = parse_slab(slab_f)
-
-        if slab.empty:
-            # Show raw file contents so we can diagnose
-            try:
-                slab_f.seek(0)
-                fname = slab_f.name.lower()
-                if fname.endswith(".csv"):
-                    raw_preview = pd.read_csv(slab_f, header=None, dtype=str, nrows=8)
-                else:
-                    slab_f.seek(0)
-                    raw_preview = pd.read_excel(slab_f, header=None, dtype=str, nrows=8)
-                slab_f.seek(0)
-                st.error("❌ Slab file could not be parsed. Raw contents of your file:")
-                st.dataframe(raw_preview)
-                st.error("The file above is what your slab Excel contains. "
-                         "Ensure it has numeric growth % and payout % values "
-                         "in columns A, B, C, D with NO text-only rows in the data area.")
-            except Exception as ex:
-                st.error(f"❌ Could not even read slab file: {ex}")
-            st.stop()
-        else:
-            st.success(f"✅ Slab loaded: {len(slab)} brackets")
-            st.dataframe(slab)
-
-        proc = VLDSProcessor(excl, slab)
-        proc.stats["quarter"] = quarter_sel
-        proc.stats["year"]    = str(year_sel)
-
-        out, logs, stats = proc.run(
-            vlds_f   = S.files.get("vlds_main"),
-            dfrecd_f = S.files.get("df_recd"),
-            prev_f   = S.files.get("prev_year"),
-            dealer_f = S.files.get("dealer_list"),
-            prev_join_col = _auto_jc,
-            prev_amt_col  = _auto_ac,
-            slab_type = slab_type,
-            cb = cb)
-
-        S.result = out; S.logs = logs; S.stats = stats
-        lines = [f"VLDS Log — {quarter_sel} {year_sel} | User: {S.username} | {APP_VERSION}",
-                 "="*65]
-        for e in logs:
-            pfx = {"success":"[OK]   ","warning":"[WARN] ","error":"[ERR]  "
-                  }.get(e["lv"], "       ")
-            lines.append(pfx + str(e["msg"]))
-        S.log_txt = "\n".join(lines)
-        prog.progress(100, text="Done ✓")
-        lbl.success(
-            f"✅ Done — {stats.get('eligible',0):,} eligible rows | "
-            f"₹{stats.get('sales_cr',0):,.1f} Cr")
-        st.rerun()
-
-    except Exception as e:
-        prog.empty(); lbl.empty()
-        st.error(f"❌ {e}")
-        with st.expander("Full traceback"):
-            st.code(traceback.format_exc())
-
-# ── Post-run status ───────────────────────────────────────────────────────────
-if S.logs:
-    ec = sum(1 for e in S.logs if e["lv"] == "error")
-    wc = sum(1 for e in S.logs if e["lv"] == "warning")
-    if ec:
-        st.error(f"⛔ {ec} error(s) — download the log for details.")
-        for e in [x for x in S.logs if x["lv"] == "error"][:3]:
-            st.markdown(f'<small>⛔ {str(e["msg"])[:280]}</small>',
-                        unsafe_allow_html=True)
-    elif wc:
-        st.warning(f"⚠️ {wc} warning(s) — download the log for details.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FOOTER
-# ══════════════════════════════════════════════════════════════════════════════
-footer_content = FOOTER_TEXT if FOOTER_TEXT else f"VLDS Pro {APP_VERSION} · Forest Dealerships"
-st.markdown(
-    f'<div class="app-footer">{footer_content}</div>',
-    unsafe_allow_html=True)
