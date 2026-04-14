@@ -1,35 +1,15 @@
-# ════════════════════════════════════════════════════════════════════════
-# MAIN UI (CLEAN LAYOUT LIKE IMAGE)
-# ════════════════════════════════════════════════════════════════════════
+st.markdown('<div class="sec-head">⚙️ Report Settings</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="sec-head">📂 Input Files</div>', unsafe_allow_html=True)
+st.markdown('<div class="cfg-panel">', unsafe_allow_html=True)
 
-# --- GRID (3 columns like image) ---
-cols = st.columns(3, gap="large")
+c1, c2 = st.columns(2)
 
-for i, (key, icon, label, req) in enumerate(FILE_DEFS):
-    with cols[i % 3]:
+with c1:
+    quarter_sel = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4"], index=3)
 
-        st.markdown(f"""
-        <div style="font-size:.7rem;font-weight:700;color:#3D4F63;margin-bottom:4px;">
-            {label}
-        </div>
-        """, unsafe_allow_html=True)
+with c2:
+    year_sel = st.selectbox("Year", list(range(2022, 2033)), index=3)
 
-        wk = f"fu_{key}"
-        uploaded = st.file_uploader(
-            "Browse file",
-            type=["xlsx","xls","csv"],
-            key=wk,
-            label_visibility="collapsed"
-        )
+slab_type = st.radio("Payout Type", ["Quarterly", "Annual"], horizontal=True)
 
-        if uploaded is not None:
-            S.files[key] = uploaded
-            S.file_warnings[key] = _check(key, uploaded)
-
-        if key in S.files:
-            st.markdown(
-                f"<div style='font-size:.6rem;color:#2D6B21;'>✓ {S.files[key].name}</div>",
-                unsafe_allow_html=True
-            )
+st.markdown('</div>', unsafe_allow_html=True)
