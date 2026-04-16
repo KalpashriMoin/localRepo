@@ -1,1 +1,16 @@
 
+pyinstaller --onefile --noconsole --name "VLDS_Pro" ^
+  --add-data "app.py;." ^
+  --add-data "auth.py;." ^
+  --add-data "users.json;." ^
+  --add-data "logo.PNG;." ^
+  --add-data "modules;modules" ^
+  --add-data "C:\path\to\site-packages\streamlit;streamlit" ^
+  --hidden-import streamlit ^
+  --hidden-import streamlit.runtime ^
+  --hidden-import streamlit.runtime.scriptrunner ^
+  --hidden-import pandas ^
+  --hidden-import openpyxl ^
+  --hidden-import xlsxwriter ^
+  --hidden-import xlrd ^
+  launcher.py
