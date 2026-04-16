@@ -1,2 +1,9 @@
-
-pyinstaller --onefile --noconsole --name="VLDS_Pro" --add-data="app.py:." --add-data="auth.py:." --add-data="utils.py:." --add-data="processor.py:." --add-data="users.json:." --add-data="logo.PNG:." --hidden-import=streamlit --hidden-import=streamlit.runtime --hidden-import=streamlit.runtime.scriptrunner --hidden-import=pandas --hidden-import=openpyxl --hidden-import=xlsxwriter --hidden-import=xlrd launcher.py
+pyinstaller app.py --onefile ^
+  --copy-metadata streamlit ^
+  --copy-metadata pyarrow ^
+  --copy-metadata pandas ^
+  --copy-metadata requests ^
+  --copy-metadata altair ^
+  --hidden-import streamlit ^
+  --hidden-import streamlit.runtime.scriptrunner.magic_funcs ^
+  --collect-all streamlit
