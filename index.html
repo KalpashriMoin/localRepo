@@ -1,15 +1,11 @@
 # app_tk.py | VLDS Pro v2 — Forest Dealerships
-# Tkinter UI — zero Streamlit dependency
-# Canyon #C4622D | Willow #5C7A4E | Summit #3D4F63
-
+# Tkinter UI — no login, no auth, runs standalone
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading
-import queue
-import os, sys, re, io, traceback
+import threading, queue, os, sys, re, io, traceback
 import pandas as pd
 
-# ── Path helper for PyInstaller .exe ──────────────────────────────────────────
+# ── Path fix for PyInstaller .exe ─────────────────────────────────────────────
 def _base():
     if getattr(sys, "frozen", False):
         return sys._MEIPASS
@@ -17,17 +13,21 @@ def _base():
 
 BASE = _base()
 sys.path.insert(0, BASE)
+sys.path.insert(0, os.path.join(BASE, "modules"))
 
-from auth      import verify_login
-from utils     import parse_excl, parse_slab, read_file
-from processor import VLDSProcessor
+# ── Imports from modules folder ───────────────────────────────────────────────
+try:
+    from modules.utils     import parse_excl, parse_slab, read_file
+    from modules.processor import VLDSProcessor
+except ImportError:
+    from utils     import parse_excl, parse_slab, read_file
+    from processor import VLDSProcessor
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 APP_VERSION = "v2.1.0"
 FOOTER_TEXT = "Application Designed and Developed by DES Finance Automation and Analytics Team @2026"
 LOGO_PATH   = os.path.join(BASE, "logo.PNG")
 
-# Colors
 C_CANYON  = "#C4622D"
 C_WILLOW  = "#5C7A4E"
 C_SUMMIT  = "#3D4F63"
@@ -37,11 +37,9 @@ C_DARK    = "#2C3A4A"
 C_BORDER  = "#D9DCE3"
 C_GREEN   = "#2D6B21"
 C_AMBER   = "#92400E"
-C_RED_LT  = "#FEF2F2"
 C_GREEN_LT= "#EBF2E8"
 C_AMBER_LT= "#FEF3C7"
 
-# File definitions: (key, label, required)
 FILE_DEFS = [
     ("vlds_main",   "VLDS Main File",        True),
     ("df_recd",     "DF & RECD File",         True),
@@ -51,12 +49,11 @@ FILE_DEFS = [
     ("slab_file",   "Slab Table",             True),
     ("base_data",   "Base Data",              False),
 ]
-
 REQ_KEYS = ["vlds_main","df_recd","prev_year","dealer_list","excl_file","slab_file"]
 
 SLOT_KW = {
-    "vlds_main":   ["vlds main","vlds-main","vlds_main","4s main","cmi"],
-    "df_recd":     ["df recd","dfrecd","df&recd","df_recd","discount factor"],
+    "vlds_main":   ["vlds main","vlds-main","vlds_main","4s main"],
+    "df_recd":     ["df recd","dfrecd","df&recd","discount factor"],
     "prev_year":   ["previous year","prev year","q4-24","q4-23","last year"],
     "dealer_list": ["dealer list","dealer_list","4s dealer","dealer master"],
     "excl_file":   ["exclusion list","excl list","exclusion_list","exclusion"],
@@ -77,425 +74,307 @@ def _check_file(key, fpath):
         return f"Looks like '{SLOT_NAMES[best]}' — verify"
     return ""
 
+def _open_file(path):
+    buf = open(path,"rb").read()
+    f = io.BytesIO(buf)
+    f.name = os.path.basename(path)
+    return f
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STYLE HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-def _btn(parent, text, cmd, bg=C_CANYON, fg="white", width=None, font_size=9):
+# ── UI helpers ────────────────────────────────────────────────────────────────
+def _btn(parent, text, cmd, bg=C_CANYON, fg="white", width=None, font_size=9, state="normal"):
     kw = dict(text=text, command=cmd, bg=bg, fg=fg,
-              font=("Segoe UI",font_size,"bold"),
+              font=("Segoe UI", font_size, "bold"),
               relief="flat", cursor="hand2",
               activebackground=C_DARK, activeforeground="white",
-              padx=10, pady=4)
+              padx=10, pady=4, state=state)
     if width: kw["width"] = width
     b = tk.Button(parent, **kw)
-    def _on(e): b.config(bg=C_DARK)
-    def _off(e): b.config(bg=bg)
+    def _on(e):
+        if b["state"] != "disabled": b.config(bg=C_DARK if bg not in ("#cccccc","#fee2e2") else bg)
+    def _off(e):
+        if b["state"] != "disabled": b.config(bg=bg)
     b.bind("<Enter>", _on); b.bind("<Leave>", _off)
     return b
 
-def _label(parent, text, size=9, bold=False, color=C_SUMMIT, bg=C_BG, **kw):
-    weight = "bold" if bold else "normal"
-    return tk.Label(parent, text=text, font=("Segoe UI",size,weight),
-                    fg=color, bg=bg, **kw)
-
-def _sep(parent, bg=C_BORDER):
-    return tk.Frame(parent, bg=bg, height=1)
-
-def _card(parent, bg=C_WHITE, bd=1, relief="solid"):
-    f = tk.Frame(parent, bg=bg, bd=bd, relief=relief,
-                 highlightbackground=C_BORDER, highlightthickness=1)
-    return f
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LOGIN WINDOW
-# ══════════════════════════════════════════════════════════════════════════════
-class LoginWindow(tk.Toplevel):
-    def __init__(self, root, on_success):
-        super().__init__(root)
-        self.root       = root
-        self.on_success = on_success
-        self.title(f"VLDS Pro {APP_VERSION} — Sign In")
-        self.geometry("420x380")
-        self.resizable(False, False)
-        self.configure(bg=C_BG)
-        self.grab_set()
-        self._center()
-        self._build()
-
-    def _center(self):
-        self.update_idletasks()
-        sw = self.winfo_screenwidth(); sh = self.winfo_screenheight()
-        x = (sw-420)//2; y = (sh-380)//2
-        self.geometry(f"420x380+{x}+{y}")
-
-    def _build(self):
-        outer = tk.Frame(self, bg=C_BG)
-        outer.place(relx=.5, rely=.5, anchor="center")
-
-        # Card
-        card = tk.Frame(outer, bg=C_WHITE, bd=2, relief="solid",
-                        highlightbackground=C_CANYON, highlightthickness=2)
-        card.pack(padx=20, pady=20, ipadx=20, ipady=20)
-
-        _label(card,"VLDS Incentive Processor",13,True,C_SUMMIT,C_WHITE).pack(pady=(10,2))
-        _label(card,f"Forest Dealerships · {APP_VERSION}",9,False,"#5C7A4E",C_WHITE).pack()
-
-        self.err_var = tk.StringVar()
-        self.err_lbl = tk.Label(card, textvariable=self.err_var,
-                                font=("Segoe UI",8), fg="#B91C1C",
-                                bg="#FEF2F2", relief="flat", pady=3)
-
-        tk.Frame(card, height=12, bg=C_WHITE).pack()
-
-        _label(card,"Username",9,True,C_SUMMIT,C_WHITE).pack(anchor="w",padx=10)
-        self.u_var = tk.StringVar()
-        u_ent = ttk.Entry(card, textvariable=self.u_var, font=("Segoe UI",10), width=28)
-        u_ent.pack(padx=10, pady=(2,8), ipady=4)
-        u_ent.focus()
-
-        _label(card,"Password",9,True,C_SUMMIT,C_WHITE).pack(anchor="w",padx=10)
-        self.p_var = tk.StringVar()
-        p_ent = ttk.Entry(card, textvariable=self.p_var, show="•",
-                          font=("Segoe UI",10), width=28)
-        p_ent.pack(padx=10, pady=(2,12), ipady=4)
-        p_ent.bind("<Return>", lambda e: self._login())
-
-        btn = _btn(card, "Sign In  →", self._login, width=26, font_size=10)
-        btn.pack(padx=10, pady=(0,8), ipady=4)
-
-        _label(card,"Access restricted to authorised users.",8,False,"#94A3B8",C_WHITE).pack()
-
-    def _login(self):
-        u = self.u_var.get().strip()
-        p = self.p_var.get().strip()
-        if not u or not p:
-            self._show_err("Please enter both username and password.")
-            return
-        if verify_login(u, p):
-            self.destroy()
-            self.on_success(u.lower())
-        else:
-            self._show_err("Invalid username or password.")
-
-    def _show_err(self, msg):
-        self.err_var.set(f"⚠  {msg}")
-        self.err_lbl.pack(pady=(4,4), padx=10, fill="x")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION WINDOW
+# MAIN APP
 # ══════════════════════════════════════════════════════════════════════════════
 class VLDSApp:
     def __init__(self, root):
-        self.root     = root
-        self.username = ""
-        self.files    = {}          # key → file path string
-        self.result   = None        # bytes of output xlsx
-        self.log_txt  = ""
-        self.stats    = {}
-        self.q        = queue.Queue()
-        self._file_labels = {}      # key → StringVar for filename display
-        self._file_status = {}      # key → Label for color feedback
-        self._processing  = False
+        self.root        = root
+        self.files       = {}
+        self.result      = None
+        self.log_txt     = ""
+        self.stats       = {}
+        self.q           = queue.Queue()
+        self._processing = False
+        self._auto_jc    = None
+        self._auto_ac    = None
+        self._file_labels = {}
+        self._file_flbls  = {}
+        self._build()
 
-        self.root.withdraw()        # hide until after login
-        self._login()
-
-    # ── Login ─────────────────────────────────────────────────────────────────
-    def _login(self):
-        lw = LoginWindow(self.root, self._after_login)
-        self.root.wait_window(lw)
-        if not self.username:
-            self.root.destroy()
-
-    def _after_login(self, username):
-        self.username = username
-        self.root.deiconify()
-        self._build_main()
-
-    # ── Main window ───────────────────────────────────────────────────────────
-    def _build_main(self):
+    def _build(self):
         self.root.title(f"VLDS Pro {APP_VERSION} — Forest Dealerships")
         self.root.configure(bg=C_BG)
-        self.root.state("zoomed")   # maximise on Windows
+        self.root.state("zoomed")
 
-        # ── TOP BAR ───────────────────────────────────────────────────────────
-        topbar = tk.Frame(self.root, bg=C_SUMMIT, height=52)
-        topbar.pack(fill="x", padx=10, pady=(8,0))
+        # ── TOPBAR ────────────────────────────────────────────────────────────
+        topbar = tk.Frame(self.root, bg=C_SUMMIT, height=54)
+        topbar.pack(fill="x")
         topbar.pack_propagate(False)
 
-        left_tb = tk.Frame(topbar, bg=C_SUMMIT)
-        left_tb.pack(side="left", padx=14, pady=6)
+        accent = tk.Frame(topbar, bg=C_CANYON, width=6)
+        accent.pack(side="left", fill="y")
 
-        # Canyon accent line on left
-        tk.Frame(topbar, bg=C_CANYON, width=5).pack(side="left", fill="y")
-
-        tk.Label(left_tb, text="VLDS Incentive Processor",
+        lf = tk.Frame(topbar, bg=C_SUMMIT)
+        lf.pack(side="left", padx=14, pady=8)
+        tk.Label(lf, text="VLDS Incentive Processor",
                  font=("Segoe UI",13,"bold"), fg="white", bg=C_SUMMIT).pack(anchor="w")
-        tk.Label(left_tb, text="Forest Dealerships · 4S Dealer Eligibility & Quarterly Payout",
+        tk.Label(lf, text="Forest Dealerships  ·  4S Dealer Eligibility & Quarterly Payout",
                  font=("Segoe UI",8), fg="#aaaacc", bg=C_SUMMIT).pack(anchor="w")
 
-        right_tb = tk.Frame(topbar, bg=C_SUMMIT)
-        right_tb.pack(side="right", padx=14, pady=6)
-
-        for txt, bg, fg in [
-            (f"VLDS Pro", "#5a2a14", "#F5D9CF"),
-            ("Forest Dealerships", "#2a4025", "#C8DBBF"),
-            (APP_VERSION, "#1a1a3a", "#C7D2FE"),
-            (f"👤 {self.username}", C_DARK, "#dddddd"),
+        rf = tk.Frame(topbar, bg=C_SUMMIT)
+        rf.pack(side="right", padx=14)
+        for txt, fg, pbg in [
+            (APP_VERSION,         "#C7D2FE","#1a1a3a"),
+            ("Forest Dealerships","#C8DBBF","#1a3020"),
+            ("VLDS Pro",          "#F5D9CF","#4a1a08"),
         ]:
-            tk.Label(right_tb, text=txt, font=("Segoe UI",8,"bold"),
-                     fg=fg, bg=bg, padx=8, pady=2,
-                     relief="flat").pack(side="right", padx=3)
+            tk.Label(rf, text=f" {txt} ", font=("Segoe UI",8,"bold"),
+                     fg=fg, bg=pbg, padx=6, pady=3).pack(side="right", padx=3, pady=10)
 
-        # ── MAIN BODY — two columns ───────────────────────────────────────────
+        # ── BODY ──────────────────────────────────────────────────────────────
         body = tk.Frame(self.root, bg=C_BG)
-        body.pack(fill="both", expand=True, padx=10, pady=8)
+        body.pack(fill="both", expand=True, padx=12, pady=8)
         body.columnconfigure(0, weight=55)
         body.columnconfigure(1, weight=45)
         body.rowconfigure(0, weight=1)
 
-        left_col  = tk.Frame(body, bg=C_BG)
-        right_col = tk.Frame(body, bg=C_BG)
-        left_col.grid( row=0, column=0, sticky="nsew", padx=(0,6))
-        right_col.grid(row=0, column=1, sticky="nsew", padx=(6,0))
+        left  = tk.Frame(body, bg=C_BG)
+        right = tk.Frame(body, bg=C_BG)
+        left.grid( row=0, column=0, sticky="nsew", padx=(0,8))
+        right.grid(row=0, column=1, sticky="nsew")
 
-        self._build_file_panel(left_col)
-        self._build_settings_panel(right_col)
+        self._build_files(left)
+        self._build_settings(right)
 
         # ── FOOTER ────────────────────────────────────────────────────────────
-        footer = tk.Frame(self.root, bg=C_SUMMIT, height=28)
-        footer.pack(fill="x", side="bottom")
-        footer.pack_propagate(False)
-        ftxt = FOOTER_TEXT or f"VLDS Pro {APP_VERSION} · Forest Dealerships"
-        tk.Label(footer, text=ftxt, font=("Segoe UI",8),
+        ft = tk.Frame(self.root, bg=C_SUMMIT, height=26)
+        ft.pack(fill="x", side="bottom")
+        ft.pack_propagate(False)
+        tk.Label(ft, text=FOOTER_TEXT, font=("Segoe UI",7),
                  fg="#aaaacc", bg=C_SUMMIT).pack(expand=True)
 
-        # Poll the queue for UI updates from worker thread
         self.root.after(100, self._poll_queue)
 
-    # ── File panel (LEFT) ─────────────────────────────────────────────────────
-    def _build_file_panel(self, parent):
-        # Section heading
-        hdr = tk.Frame(parent, bg=C_BG)
-        hdr.pack(fill="x", pady=(0,4))
-        tk.Frame(hdr, bg=C_CANYON, width=4, height=18).pack(side="left")
-        tk.Label(hdr, text="  INPUT FILES", font=("Segoe UI",9,"bold"),
+    # ── File panel ────────────────────────────────────────────────────────────
+    def _build_files(self, parent):
+        hf = tk.Frame(parent, bg=C_BG)
+        hf.pack(fill="x", pady=(0,5))
+        tk.Frame(hf, bg=C_CANYON, width=4, height=20).pack(side="left")
+        tk.Label(hf, text="  INPUT FILES", font=("Segoe UI",10,"bold"),
                  fg=C_SUMMIT, bg=C_BG).pack(side="left")
 
-        # File rows card
-        card = _card(parent, bg=C_WHITE)
+        card = tk.Frame(parent, bg=C_WHITE, relief="solid", bd=1,
+                        highlightbackground=C_BORDER, highlightthickness=1)
         card.pack(fill="both", expand=True)
 
         for i, (key, label, req) in enumerate(FILE_DEFS):
-            self._build_file_row(card, key, label, req, i)
+            if i > 0:
+                tk.Frame(card, bg=C_BORDER, height=1).pack(fill="x", padx=6)
+            self._build_file_row(card, key, label, req)
 
-    def _build_file_row(self, parent, key, label, req, idx):
-        bg = C_WHITE
-        row = tk.Frame(parent, bg=bg, pady=5)
-        row.pack(fill="x", padx=8, pady=1)
+    def _build_file_row(self, parent, key, label, req):
+        row = tk.Frame(parent, bg=C_WHITE)
+        row.pack(fill="x", padx=10, pady=5)
 
-        # Separator (not first)
-        if idx > 0:
-            tk.Frame(parent, bg=C_BORDER, height=1).pack(fill="x", padx=8)
-
-        # Label + badge
-        lf = tk.Frame(row, bg=bg)
-        lf.pack(side="left", fill="y")
+        # Left: label + badge
+        lf = tk.Frame(row, bg=C_WHITE)
+        lf.pack(side="left")
         tk.Label(lf, text=label, font=("Segoe UI",9,"bold"),
-                 fg=C_SUMMIT, bg=bg, width=18, anchor="w").pack(side="left")
+                 fg=C_SUMMIT, bg=C_WHITE, width=20, anchor="w").pack(side="left")
         badge_txt = "REQ" if req else "OPT"
         badge_fg  = C_CANYON if req else "#64748B"
         badge_bg  = "#FDF4F1" if req else "#F1F5F9"
         tk.Label(lf, text=badge_txt, font=("Segoe UI",7,"bold"),
-                 fg=badge_fg, bg=badge_bg,
-                 relief="solid", bd=1, padx=4).pack(side="left", padx=4)
+                 fg=badge_fg, bg=badge_bg, relief="solid", bd=1,
+                 padx=4, pady=1).pack(side="left", padx=4)
 
-        # Filename display
+        # Right: clear + browse buttons
+        rf = tk.Frame(row, bg=C_WHITE)
+        rf.pack(side="right")
+
+        clear_btn = tk.Button(rf, text="✕", command=lambda k=key: self._clear(k),
+                              font=("Segoe UI",8,"bold"), fg="#991b1b", bg="#fee2e2",
+                              relief="flat", cursor="hand2", padx=6, pady=2, bd=1)
+        clear_btn.pack(side="right", padx=(3,0))
+
+        _btn(rf, "Browse", lambda k=key: self._browse(k),
+             bg=C_CANYON, font_size=8).pack(side="right")
+
+        # Middle: filename label
         fvar = tk.StringVar(value="No file selected")
         self._file_labels[key] = fvar
         fl = tk.Label(row, textvariable=fvar, font=("Segoe UI",8),
-                      fg="#9CA3AF", bg=bg, width=30, anchor="w")
-        fl.pack(side="left", padx=6)
-        self._file_status[key] = fl
-
-        # Browse button
-        _btn(row, "Browse", lambda k=key: self._browse(k),
-             bg=C_CANYON, font_size=8).pack(side="right", padx=(2,4))
-
-        # Clear button
-        _btn(row, "✕", lambda k=key: self._clear_file(k),
-             bg="#fee2e2", fg="#991b1b", font_size=8).pack(side="right", padx=2)
+                      fg="#9CA3AF", bg=C_WHITE, anchor="w")
+        fl.pack(side="left", fill="x", expand=True, padx=8)
+        self._file_flbls[key] = fl
 
     def _browse(self, key):
         path = filedialog.askopenfilename(
             title=f"Select {SLOT_NAMES.get(key, key)}",
-            filetypes=[("Excel/CSV files","*.xlsx *.xls *.csv"),
-                       ("All files","*.*")])
-        if not path:
-            return
+            filetypes=[("Excel/CSV","*.xlsx *.xls *.csv"),("All files","*.*")])
+        if not path: return
         self.files[key] = path
         fname = os.path.basename(path)
         warn  = _check_file(key, path)
-        lbl   = self._file_labels[key]
-        fl    = self._file_status[key]
         if warn:
-            lbl.set(f"⚠ {fname[:40]} — {warn}")
-            fl.config(fg=C_AMBER)
+            self._file_labels[key].set(f"⚠  {fname[:38]} — {warn}")
+            self._file_flbls[key].config(fg=C_AMBER)
         else:
-            lbl.set(f"✓  {fname[:45]}")
-            fl.config(fg=C_GREEN)
-        self._refresh_ready()
-
-        # Auto-detect prev year columns when that file is loaded
+            self._file_labels[key].set(f"✓  {fname[:45]}")
+            self._file_flbls[key].config(fg=C_GREEN)
         if key == "prev_year":
-            self._detect_prev_cols(path)
+            self._detect_prev(path)
+        self._refresh()
 
-    def _clear_file(self, key):
+    def _clear(self, key):
         self.files.pop(key, None)
         self._file_labels[key].set("No file selected")
-        self._file_status[key].config(fg="#9CA3AF")
-        self._refresh_ready()
+        self._file_flbls[key].config(fg="#9CA3AF")
         if key == "prev_year":
-            self._auto_jc = None
-            self._auto_ac = None
+            self._auto_jc = self._auto_ac = None
             self._update_prev_info()
+        self._refresh()
 
-    # ── Settings panel (RIGHT) ────────────────────────────────────────────────
-    def _build_settings_panel(self, parent):
-        # ── Report settings card ──────────────────────────────────────────────
-        hdr2 = tk.Frame(parent, bg=C_BG)
-        hdr2.pack(fill="x", pady=(0,4))
-        tk.Frame(hdr2, bg=C_CANYON, width=4, height=18).pack(side="left")
-        tk.Label(hdr2, text="  REPORT SETTINGS", font=("Segoe UI",9,"bold"),
+    # ── Settings panel ────────────────────────────────────────────────────────
+    def _build_settings(self, parent):
+        hf = tk.Frame(parent, bg=C_BG)
+        hf.pack(fill="x", pady=(0,5))
+        tk.Frame(hf, bg=C_CANYON, width=4, height=20).pack(side="left")
+        tk.Label(hf, text="  REPORT SETTINGS", font=("Segoe UI",10,"bold"),
                  fg=C_SUMMIT, bg=C_BG).pack(side="left")
 
-        cfg = _card(parent, bg=C_WHITE)
-        cfg.pack(fill="x", pady=(0,6))
+        cfg = tk.Frame(parent, bg=C_WHITE, relief="solid", bd=1,
+                       highlightbackground=C_BORDER, highlightthickness=1)
+        cfg.pack(fill="x", pady=(0,8))
 
-        row1 = tk.Frame(cfg, bg=C_WHITE)
-        row1.pack(fill="x", padx=10, pady=(8,4))
+        r1 = tk.Frame(cfg, bg=C_WHITE)
+        r1.pack(fill="x", padx=12, pady=(10,5))
 
         # Quarter
-        qf = tk.Frame(row1, bg=C_WHITE)
+        qf = tk.Frame(r1, bg=C_WHITE)
         qf.pack(side="left", padx=(0,20))
-        tk.Label(qf,"Quarter",font=("Segoe UI",9,"bold"),fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
+        tk.Label(qf,"Quarter",font=("Segoe UI",9,"bold"),
+                 fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
         self.quarter_var = tk.StringVar(value="Q4")
-        q_cb = ttk.Combobox(qf, textvariable=self.quarter_var,
-                            values=["Q1","Q2","Q3","Q4"], state="readonly", width=8)
-        q_cb.pack(pady=2)
+        ttk.Combobox(qf, textvariable=self.quarter_var,
+                     values=["Q1","Q2","Q3","Q4"],
+                     state="readonly", width=7).pack(pady=2, ipady=3)
 
         # Year
-        yf = tk.Frame(row1, bg=C_WHITE)
+        yf = tk.Frame(r1, bg=C_WHITE)
         yf.pack(side="left", padx=(0,20))
-        tk.Label(yf,"Year",font=("Segoe UI",9,"bold"),fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
+        tk.Label(yf,"Year",font=("Segoe UI",9,"bold"),
+                 fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
         self.year_var = tk.StringVar(value="2025")
-        y_cb = ttk.Combobox(yf, textvariable=self.year_var,
-                            values=[str(y) for y in range(2022,2033)],
-                            state="readonly", width=8)
-        y_cb.pack(pady=2)
+        ttk.Combobox(yf, textvariable=self.year_var,
+                     values=[str(y) for y in range(2022,2033)],
+                     state="readonly", width=7).pack(pady=2, ipady=3)
 
         # Custom year
-        cyf = tk.Frame(row1, bg=C_WHITE)
+        cyf = tk.Frame(r1, bg=C_WHITE)
         cyf.pack(side="left")
-        tk.Label(cyf,"Custom Year",font=("Segoe UI",9,"bold"),fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
-        self.custom_year_var = tk.StringVar()
-        ttk.Entry(cyf, textvariable=self.custom_year_var,
-                  width=10, font=("Segoe UI",9)).pack(pady=2, ipady=2)
+        tk.Label(cyf,"Custom Year",font=("Segoe UI",9,"bold"),
+                 fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
+        self.custom_yr = tk.StringVar()
+        ttk.Entry(cyf, textvariable=self.custom_yr, width=9).pack(pady=2, ipady=3)
 
         # Payout type
-        row2 = tk.Frame(cfg, bg=C_WHITE)
-        row2.pack(fill="x", padx=10, pady=(4,8))
-        tk.Label(row2,"Payout Type",font=("Segoe UI",9,"bold"),
+        r2 = tk.Frame(cfg, bg=C_WHITE)
+        r2.pack(fill="x", padx=12, pady=(0,10))
+        tk.Label(r2,"Payout Type",font=("Segoe UI",9,"bold"),
                  fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
-        pf = tk.Frame(row2, bg=C_WHITE)
+        pf = tk.Frame(r2, bg=C_WHITE)
         pf.pack(anchor="w")
         self.payout_var = tk.StringVar(value="Quarterly")
         for val in ["Quarterly","Annual"]:
             tk.Radiobutton(pf, text=val, variable=self.payout_var, value=val,
-                          font=("Segoe UI",9), fg=C_SUMMIT, bg=C_WHITE,
-                          activebackground=C_WHITE,
-                          selectcolor=C_CANYON).pack(side="left", padx=8)
+                           font=("Segoe UI",9), fg=C_SUMMIT, bg=C_WHITE,
+                           activebackground=C_WHITE,
+                           selectcolor=C_CANYON).pack(side="left", padx=10)
 
-        # ── Prev year auto-detect info ─────────────────────────────────────────
-        self._auto_jc = None
-        self._auto_ac = None
+        # Prev year info box
         self.prev_info_var = tk.StringVar(value="")
         self.prev_info_lbl = tk.Label(parent, textvariable=self.prev_info_var,
                                       font=("Segoe UI",8), fg=C_GREEN,
                                       bg=C_GREEN_LT, relief="flat",
                                       justify="left", anchor="w",
-                                      wraplength=380, padx=8, pady=6)
+                                      wraplength=420, padx=8, pady=6)
 
-        # ── Status label ──────────────────────────────────────────────────────
-        self.status_var = tk.StringVar(value="")
+        # Status
+        self.status_var = tk.StringVar(value="Load all required files to begin")
         self.status_lbl = tk.Label(parent, textvariable=self.status_var,
-                                   font=("Segoe UI",9), fg=C_SUMMIT,
-                                   bg=C_BG, wraplength=380, justify="left")
-        self.status_lbl.pack(fill="x", pady=(2,0))
+                                   font=("Segoe UI",9), fg=C_AMBER,
+                                   bg=C_BG, wraplength=420, justify="left")
+        self.status_lbl.pack(fill="x", pady=(4,4))
 
-        # ── Run button ────────────────────────────────────────────────────────
-        self.run_btn = _btn(parent, f"🚀  Run", self._on_run,
-                            bg=C_CANYON, font_size=11)
-        self.run_btn.pack(fill="x", pady=(6,4), ipady=6)
-        self._refresh_run_label()
+        # Run button
+        self.run_btn = _btn(parent, "🚀  Run Q4-25", self._on_run,
+                            bg=C_CANYON, font_size=11, state="disabled")
+        self.run_btn.config(bg="#cccccc")
+        self.run_btn.pack(fill="x", pady=(2,6), ipady=7)
 
-        # ── Progress bar ──────────────────────────────────────────────────────
+        # Progress
         self.prog_var = tk.DoubleVar(value=0)
-        self.prog_bar = ttk.Progressbar(parent, variable=self.prog_var,
-                                        maximum=100, mode="determinate")
-        self.prog_bar.pack(fill="x", pady=(0,2))
+        ttk.Progressbar(parent, variable=self.prog_var,
+                        maximum=100).pack(fill="x", pady=(0,2))
+        self.prog_msg = tk.StringVar(value="")
+        tk.Label(parent, textvariable=self.prog_msg,
+                 font=("Segoe UI",8), fg="#5C7A4E",
+                 bg=C_BG, anchor="w").pack(fill="x")
 
-        self.prog_lbl_var = tk.StringVar(value="")
-        tk.Label(parent, textvariable=self.prog_lbl_var,
-                 font=("Segoe UI",8), fg="#5C7A4E", bg=C_BG).pack(anchor="w")
+        # Download buttons
+        df = tk.Frame(parent, bg=C_BG)
+        df.pack(fill="x", pady=(8,6))
+        self.dl_rep = _btn(df, "📥  Save Report", self._save_report,
+                           bg="#cccccc", font_size=9, state="disabled")
+        self.dl_rep.pack(side="left", fill="x", expand=True, padx=(0,4), ipady=5)
+        self.dl_log = _btn(df, "📋  Save Log", self._save_log,
+                           bg="#cccccc", font_size=9, state="disabled")
+        self.dl_log.pack(side="left", fill="x", expand=True, padx=(4,0), ipady=5)
 
-        # ── Download buttons ──────────────────────────────────────────────────
-        dbf = tk.Frame(parent, bg=C_BG)
-        dbf.pack(fill="x", pady=(6,0))
-        self.dl_report_btn = _btn(dbf, "📥  Download Report",
-                                   self._download_report, bg=C_WILLOW)
-        self.dl_report_btn.pack(side="left", expand=True, fill="x",
-                                padx=(0,4), ipady=4)
-        self.dl_log_btn    = _btn(dbf, "📋  Download Log",
-                                   self._download_log, bg=C_SUMMIT)
-        self.dl_log_btn.pack(side="left", expand=True, fill="x",
-                              padx=(4,0), ipady=4)
-        self.dl_report_btn.config(state="disabled", bg="#cccccc")
-        self.dl_log_btn.config(state="disabled", bg="#cccccc")
-
-        # ── Stats card ────────────────────────────────────────────────────────
-        self.stats_frame = tk.Frame(parent, bg=C_SUMMIT,
-                                    relief="flat", bd=0)
-        self.stats_labels = {}
-        for col, (key2, label2, color) in enumerate([
-            ("total",    "Total Rows",    "#93C5FD"),
-            ("eligible", "Eligible",      "#86EFAC"),
-            ("excluded", "Excluded",      "#FCA5A5"),
-            ("sales_cr", "Eligible Sales","#FCD34D"),
+        # Stats
+        self.stats_frame = tk.Frame(parent, bg=C_SUMMIT, relief="flat")
+        sf_inner = tk.Frame(self.stats_frame, bg=C_SUMMIT)
+        sf_inner.pack(padx=8, pady=8)
+        self.stat_vars = {}
+        for col,(k,lbl,clr) in enumerate([
+            ("total",    "TOTAL ROWS",    "#93C5FD"),
+            ("eligible", "ELIGIBLE",      "#86EFAC"),
+            ("excluded", "EXCLUDED",      "#FCA5A5"),
+            ("sales_cr", "SALES (Cr)",    "#FCD34D"),
         ]):
-            sf = tk.Frame(self.stats_frame, bg=C_SUMMIT)
-            sf.grid(row=0, column=col, padx=12, pady=8)
+            sf = tk.Frame(sf_inner, bg=C_SUMMIT)
+            sf.grid(row=0, column=col, padx=14, pady=6)
             v = tk.StringVar(value="—")
-            self.stats_labels[key2] = v
+            self.stat_vars[k] = v
             tk.Label(sf, textvariable=v, font=("Segoe UI",14,"bold"),
-                     fg=color, bg=C_SUMMIT).pack()
-            tk.Label(sf, text=label2.upper(), font=("Segoe UI",7),
+                     fg=clr, bg=C_SUMMIT).pack()
+            tk.Label(sf, text=lbl, font=("Segoe UI",7),
                      fg="#aaaacc", bg=C_SUMMIT).pack()
 
     # ── Auto-detect prev year columns ─────────────────────────────────────────
-    def _detect_prev_cols(self, path):
+    def _detect_prev(self, path):
         try:
-            if path.lower().endswith(".csv"):
-                df = pd.read_csv(path, nrows=3, dtype=str)
-            else:
-                df = pd.read_excel(path, nrows=3, dtype=str)
+            df = (pd.read_csv(path, nrows=3, dtype=str)
+                  if path.lower().endswith(".csv")
+                  else pd.read_excel(path, nrows=3, dtype=str))
             cols = [str(c).strip() for c in df.columns
-                    if not (isinstance(c, float) and pd.isna(c)) and str(c).strip()]
-            self._auto_jc = None
-            self._auto_ac = None
+                    if not (isinstance(c,float) and pd.isna(c)) and str(c).strip()]
+            self._auto_jc = self._auto_ac = None
             for c in cols:
                 if any(k in c.lower() for k in
                        ["customer number","customer account","dealer number","dealer no"]):
@@ -508,263 +387,179 @@ class VLDSApp:
                 for c in cols:
                     if any(k in c.lower() for k in ["amount","total","sales","q4","q3"]):
                         self._auto_ac = c; break
-            if not self._auto_ac and len(cols) > 2:
-                self._auto_ac = cols[-1]
-            self._update_prev_info()
-        except Exception:
-            pass
+            if not self._auto_ac and len(cols)>2: self._auto_ac = cols[-1]
+        except Exception: pass
+        self._update_prev_info()
 
     def _update_prev_info(self):
         if self._auto_jc and self._auto_ac:
             self.prev_info_var.set(
                 f"Auto-detected from Previous Year file:\n"
-                f"  Customer ID   →  {self._auto_jc}\n"
-                f"  Sales Amount  →  {self._auto_ac}")
+                f"  Customer ID  →  {self._auto_jc}\n"
+                f"  Sales Amount →  {self._auto_ac}")
             self.prev_info_lbl.config(fg=C_GREEN, bg=C_GREEN_LT)
-            self.prev_info_lbl.pack(fill="x", pady=(0,5))
+            self.prev_info_lbl.pack(fill="x", pady=(0,6))
         elif "prev_year" in self.files:
             self.prev_info_var.set("⚠  Could not auto-detect columns from Previous Year file.")
             self.prev_info_lbl.config(fg=C_AMBER, bg=C_AMBER_LT)
-            self.prev_info_lbl.pack(fill="x", pady=(0,5))
+            self.prev_info_lbl.pack(fill="x", pady=(0,6))
         else:
             self.prev_info_lbl.pack_forget()
 
-    # ── Ready state helpers ───────────────────────────────────────────────────
+    # ── Refresh ready state ───────────────────────────────────────────────────
     def _get_year(self):
-        cy = self.custom_year_var.get().strip()
-        if cy and re.match(r"^20\d{2}$", cy):
-            return int(cy)
-        try:
-            return int(self.year_var.get())
-        except Exception:
-            return 2025
+        cy = self.custom_yr.get().strip()
+        if cy and re.match(r"^20\d{2}$", cy): return int(cy)
+        try: return int(self.year_var.get())
+        except: return 2025
 
-    def _refresh_run_label(self):
-        q   = self.quarter_sel() if hasattr(self,"quarter_var") else "Q4"
-        y   = str(self._get_year())[-2:]
-        self.run_btn.config(text=f"🚀  Run {q}-{y}")
-
-    def quarter_sel(self):
-        return self.quarter_var.get()
-
-    def _refresh_ready(self):
-        self._refresh_run_label()
-        missing = [n for k,n,r in [(d[0],d[1],d[2]) for d in FILE_DEFS]
-                   if r and k not in self.files]
+    def _refresh(self):
+        q  = self.quarter_var.get()
+        y  = str(self._get_year())[-2:]
+        missing = [SLOT_NAMES[k] for k,_,r in FILE_DEFS if r and k not in self.files]
         if missing:
-            self.status_var.set(f"Awaiting: {' · '.join(missing)}")
+            self.status_var.set("Awaiting: " + "  ·  ".join(missing))
             self.status_lbl.config(fg=C_AMBER)
-            self.run_btn.config(state="disabled", bg="#cccccc")
+            self.run_btn.config(state="disabled", bg="#cccccc",
+                                text=f"🚀  Run {q}-{y}")
         else:
             self.status_var.set("✓  All files ready — click Run to process")
             self.status_lbl.config(fg=C_GREEN)
-            self.run_btn.config(state="normal", bg=C_CANYON)
+            self.run_btn.config(state="normal", bg=C_CANYON,
+                                text=f"🚀  Run {q}-{y}")
 
-    # ── Run processing ────────────────────────────────────────────────────────
+    # ── Run ───────────────────────────────────────────────────────────────────
     def _on_run(self):
-        if self._processing:
-            return
-        missing = [k for k in REQ_KEYS if k not in self.files]
-        if missing:
-            messagebox.showwarning("Missing Files",
-                f"Please load these files first:\n" +
-                "\n".join(SLOT_NAMES[k] for k in missing))
-            return
-
+        if self._processing: return
         self._processing = True
-        self.result      = None
-        self.log_txt     = ""
-        self.stats       = {}
+        self.result = None; self.log_txt = ""
+        q = self.quarter_var.get()
+        y = str(self._get_year())[-2:]
         self.run_btn.config(state="disabled", bg="#cccccc",
                             text="⏳  Processing…")
         self.prog_var.set(0)
-        self.dl_report_btn.config(state="disabled", bg="#cccccc")
-        self.dl_log_btn.config(state="disabled", bg="#cccccc")
-        self.status_var.set("⏳  Processing… please wait, do not close.")
+        self.prog_msg.set("")
+        self.dl_rep.config(state="disabled", bg="#cccccc")
+        self.dl_log.config(state="disabled", bg="#cccccc")
+        self.status_var.set("⏳  Processing… do not close the window.")
         self.status_lbl.config(fg=C_AMBER)
         self.stats_frame.pack_forget()
+        threading.Thread(target=self._worker, daemon=True).start()
 
-        t = threading.Thread(target=self._run_worker, daemon=True)
-        t.start()
-
-    def _run_worker(self):
-        """Runs in background thread — communicates via self.q"""
-        def cb(pct, msg):
-            self.q.put(("progress", pct, msg))
-
+    def _worker(self):
+        def cb(pct, msg): self.q.put(("prog", pct, msg))
         try:
-            # Open file objects from paths
-            def _open(key):
-                path = self.files[key]
-                buf = open(path, "rb").read()
-                f = io.BytesIO(buf)
-                f.name = os.path.basename(path)
-                return f
-
-            excl_f = _open("excl_file")
-            slab_f = _open("slab_file")
-
-            excl = parse_excl(excl_f)
-            slab = parse_slab(slab_f)
-
+            excl = parse_excl(_open_file(self.files["excl_file"]))
+            slab = parse_slab(_open_file(self.files["slab_file"]))
             if slab.empty:
-                self.q.put(("error",
-                    "Slab table could not be parsed.\n"
-                    "Check your slab file format — ensure it has numeric\n"
-                    "growth % and payout % values in columns A, B, C, D."))
-                return
-
+                self.q.put(("err","Slab table could not be parsed.\n"
+                    "Make sure columns A/B/C/D have numeric growth & payout values.")); return
             self.q.put(("slab_ok", len(slab)))
 
-            quarter_sel = self.quarter_var.get()
-            year_sel    = str(self._get_year())
-            slab_type   = self.payout_var.get()
-
-            proc = VLDSProcessor(excl, slab)
-            proc.stats["quarter"] = quarter_sel
-            proc.stats["year"]    = year_sel
+            q_sel = self.quarter_var.get()
+            yr    = str(self._get_year())
+            st    = self.payout_var.get()
+            proc  = VLDSProcessor(excl, slab)
+            proc.stats["quarter"] = q_sel
+            proc.stats["year"]    = yr
 
             out, logs, stats = proc.run(
-                vlds_f        = _open("vlds_main"),
-                dfrecd_f      = _open("df_recd"),
-                prev_f        = _open("prev_year"),
-                dealer_f      = _open("dealer_list"),
+                vlds_f        = _open_file(self.files["vlds_main"]),
+                dfrecd_f      = _open_file(self.files["df_recd"]),
+                prev_f        = _open_file(self.files["prev_year"]),
+                dealer_f      = _open_file(self.files["dealer_list"]),
                 prev_join_col = self._auto_jc,
                 prev_amt_col  = self._auto_ac,
-                slab_type     = slab_type,
+                slab_type     = st,
                 cb            = cb)
 
-            # Build log text
-            lines = [
-                f"VLDS Log — {quarter_sel} {year_sel} | User: {self.username} | {APP_VERSION}",
-                "="*65
-            ]
+            lines = [f"VLDS Log — {q_sel} {yr} | {APP_VERSION}", "="*65]
             for e in logs:
-                pfx = {"success":"[OK]   ","warning":"[WARN] ","error":"[ERR]  "
-                      }.get(e["lv"],"       ")
+                pfx = {"success":"[OK]   ","warning":"[WARN] ",
+                       "error":"[ERR]  "}.get(e["lv"],"       ")
                 lines.append(pfx + str(e["msg"]))
-
             self.result  = out
             self.log_txt = "\n".join(lines)
-            self.stats   = stats
             self.q.put(("done", stats, logs))
-
         except Exception as e:
-            self.q.put(("error", f"{e}\n\n{traceback.format_exc()}"))
+            self.q.put(("err", f"{e}\n\n{traceback.format_exc()}"))
 
-    # ── Queue polling (runs on main thread) ───────────────────────────────────
+    # ── Queue poll ────────────────────────────────────────────────────────────
     def _poll_queue(self):
         try:
             while True:
                 msg = self.q.get_nowait()
-                kind = msg[0]
-
-                if kind == "progress":
-                    _, pct, txt = msg
-                    self.prog_var.set(pct)
-                    self.prog_lbl_var.set(f"⚙  {txt}")
-
-                elif kind == "slab_ok":
-                    n = msg[1]
-                    self.prog_lbl_var.set(f"✅  Slab loaded: {n} brackets")
-
-                elif kind == "done":
+                if msg[0] == "prog":
+                    self.prog_var.set(msg[1])
+                    self.prog_msg.set(f"⚙  {msg[2]}")
+                elif msg[0] == "slab_ok":
+                    self.prog_msg.set(f"✅  Slab loaded: {msg[1]} brackets")
+                elif msg[0] == "done":
                     _, stats, logs = msg
                     self._processing = False
                     self.prog_var.set(100)
                     q = self.quarter_var.get()
                     y = str(self._get_year())[-2:]
-                    self.run_btn.config(
-                        state="normal", bg=C_CANYON,
-                        text=f"🚀  Run {q}-{y}")
-                    self.dl_report_btn.config(state="normal", bg=C_WILLOW)
-                    self.dl_log_btn.config(state="normal", bg=C_SUMMIT)
-
+                    self.run_btn.config(state="normal", bg=C_CANYON,
+                                        text=f"🚀  Run {q}-{y}")
+                    self.dl_rep.config(state="normal", bg=C_WILLOW)
+                    self.dl_log.config(state="normal", bg=C_SUMMIT)
+                    el = stats.get("eligible",0)
+                    sc = stats.get("sales_cr",0)
                     ec = sum(1 for e in logs if e["lv"]=="error")
-                    wc = sum(1 for e in logs if e["lv"]=="warning")
-                    eligible = stats.get("eligible",0)
-                    sales    = stats.get("sales_cr",0)
-
-                    if ec:
-                        self.status_var.set(
-                            f"⚠  Done with {ec} error(s) — check log for details.")
-                        self.status_lbl.config(fg="#B91C1C")
-                    elif wc:
-                        self.status_var.set(
-                            f"✅  Done — {eligible:,} eligible rows | "
-                            f"₹{sales:,.1f} Cr  ({wc} warning(s))")
-                        self.status_lbl.config(fg=C_GREEN)
-                    else:
-                        self.status_var.set(
-                            f"✅  Done — {eligible:,} eligible rows | ₹{sales:,.1f} Cr")
-                        self.status_lbl.config(fg=C_GREEN)
-
-                    # Update stats card
-                    self.stats_labels["total"].set(f"{stats.get('total',0):,}")
-                    self.stats_labels["eligible"].set(f"{eligible:,}")
-                    self.stats_labels["excluded"].set(f"{stats.get('excluded',0):,}")
-                    self.stats_labels["sales_cr"].set(f"₹{sales:,.1f} Cr")
-                    self.stats_frame.pack(fill="x", pady=(6,0))
-
-                elif kind == "error":
+                    self.status_var.set(
+                        f"{'⚠' if ec else '✅'}  Done — {el:,} eligible rows | "
+                        f"₹{sc:,.1f} Cr{(' | '+str(ec)+' error(s)') if ec else ''}")
+                    self.status_lbl.config(fg="#B91C1C" if ec else C_GREEN)
+                    for k,v in [("total",f"{stats.get('total',0):,}"),
+                                 ("eligible",f"{el:,}"),
+                                 ("excluded",f"{stats.get('excluded',0):,}"),
+                                 ("sales_cr",f"₹{sc:,.1f} Cr")]:
+                        self.stat_vars[k].set(v)
+                    self.stats_frame.pack(fill="x", pady=(8,0))
+                elif msg[0] == "err":
                     self._processing = False
-                    q = self.quarter_var.get()
-                    y = str(self._get_year())[-2:]
-                    self.run_btn.config(
-                        state="normal", bg=C_CANYON,
-                        text=f"🚀  Run {q}-{y}")
-                    self.prog_lbl_var.set("")
-                    self.status_var.set("❌  Processing failed — see error details.")
+                    q = self.quarter_var.get(); y = str(self._get_year())[-2:]
+                    self.run_btn.config(state="normal", bg=C_CANYON,
+                                        text=f"🚀  Run {q}-{y}")
+                    self.status_var.set("❌  Processing failed.")
                     self.status_lbl.config(fg="#B91C1C")
-                    messagebox.showerror("Processing Error", msg[1][:1200])
+                    messagebox.showerror("Error", msg[1][:1500])
+        except queue.Empty: pass
+        self.root.after(150, self._poll_queue)
 
-        except queue.Empty:
-            pass
-
-        self.root.after(100, self._poll_queue)
-
-    # ── Download handlers ─────────────────────────────────────────────────────
-    def _download_report(self):
+    # ── Save files ────────────────────────────────────────────────────────────
+    def _save_report(self):
         if not self.result:
-            messagebox.showinfo("No Report", "Run the process first.")
-            return
-        q = self.quarter_var.get()
-        y = self._get_year()
-        path = filedialog.asksaveasfilename(
+            messagebox.showinfo("No Report","Run the process first."); return
+        q = self.quarter_var.get(); y = self._get_year()
+        p = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             initialfile=f"VLDS_{q}_{y}_Report.xlsx",
-            filetypes=[("Excel file","*.xlsx"),("All files","*.*")])
-        if path:
-            with open(path,"wb") as fh:
-                fh.write(self.result.getvalue()
-                         if hasattr(self.result,"getvalue")
-                         else self.result)
-            messagebox.showinfo("Saved", f"Report saved to:\n{path}")
+            filetypes=[("Excel","*.xlsx"),("All","*.*")])
+        if p:
+            data = self.result.getvalue() if hasattr(self.result,"getvalue") else self.result
+            open(p,"wb").write(data)
+            messagebox.showinfo("Saved", f"Report saved:\n{p}")
 
-    def _download_log(self):
+    def _save_log(self):
         if not self.log_txt:
-            messagebox.showinfo("No Log", "Run the process first.")
-            return
-        q = self.quarter_var.get()
-        y = self._get_year()
-        path = filedialog.asksaveasfilename(
+            messagebox.showinfo("No Log","Run the process first."); return
+        q = self.quarter_var.get(); y = self._get_year()
+        p = filedialog.asksaveasfilename(
             defaultextension=".txt",
             initialfile=f"VLDS_{q}_{y}_Log.txt",
-            filetypes=[("Text file","*.txt"),("All files","*.*")])
-        if path:
-            with open(path,"w", encoding="utf-8") as fh:
-                fh.write(self.log_txt)
-            messagebox.showinfo("Saved", f"Log saved to:\n{path}")
+            filetypes=[("Text","*.txt"),("All","*.*")])
+        if p:
+            open(p,"w",encoding="utf-8").write(self.log_txt)
+            messagebox.showinfo("Saved", f"Log saved:\n{p}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
+# ENTRY
 # ══════════════════════════════════════════════════════════════════════════════
-def main():
+if __name__ == "__main__":
     root = tk.Tk()
-    root.withdraw()
-
-    # Set app icon if logo exists
     if os.path.exists(LOGO_PATH):
         try:
             from PIL import Image, ImageTk
@@ -773,7 +568,6 @@ def main():
             root.iconphoto(True, ico)
         except Exception:
             pass
-
     app = VLDSApp(root)
     root.mainloop()
 
@@ -787,51 +581,105 @@ def main():
 
 
 
-
 @echo off
-title Building VLDS Pro .exe
+title VLDS Pro - Build EXE
+color 0A
 echo.
-echo ============================================
-echo   VLDS Pro - Building .exe with PyInstaller
-echo ============================================
-echo.
-
-REM Install dependencies
-pip install pyinstaller pillow pandas openpyxl xlsxwriter xlrd
-
-echo.
-echo Building .exe ... please wait (takes 2-5 minutes)
+echo  ============================================
+echo    VLDS Pro - Building EXE
+echo  ============================================
 echo.
 
-pyinstaller --onefile --noconsole ^
+cd /d "%~dp0"
+
+echo [1/3] Installing PyInstaller...
+pip install pyinstaller pillow --quiet
+if errorlevel 1 (
+    echo ERROR: pip install failed
+    pause
+    exit /b 1
+)
+
+echo [2/3] Building EXE... (takes 3-5 minutes, please wait)
+echo.
+
+pyinstaller ^
+  --onefile ^
+  --noconsole ^
   --name "VLDS_Pro" ^
-  --add-data "auth.py;." ^
-  --add-data "users.json;." ^
-  --add-data "logo.PNG;." ^
   --add-data "modules;modules" ^
+  --add-data "logo.PNG;." ^
+  --paths "." ^
+  --paths "modules" ^
   --hidden-import "pandas" ^
   --hidden-import "openpyxl" ^
   --hidden-import "xlsxwriter" ^
   --hidden-import "xlrd" ^
-  --hidden-import "auth" ^
-  --hidden-import "utils" ^
-  --hidden-import "processor" ^
-  --hidden-import "config" ^
-  --paths "." ^
-  --paths "modules" ^
+  --hidden-import "PIL" ^
+  --hidden-import "tkinter" ^
+  --hidden-import "tkinter.ttk" ^
+  --hidden-import "tkinter.filedialog" ^
+  --hidden-import "tkinter.messagebox" ^
   app_tk.py
 
 echo.
-echo ============================================
+echo [3/3] Done!
+echo.
 if exist "dist\VLDS_Pro.exe" (
-    echo   SUCCESS! Your .exe is in the dist folder
-    echo   dist\VLDS_Pro.exe
+    color 0A
+    echo  SUCCESS - Your EXE is ready at:
+    echo  %~dp0dist\VLDS_Pro.exe
+    echo.
+    echo  Copy these files to the client:
+    echo    dist\VLDS_Pro.exe
 ) else (
-    echo   Build may have had issues - check output above
+    color 0C
+    echo  BUILD FAILED - Check errors above
 )
-echo ============================================
 echo.
 pause
 
-if __name__ == "__main__":
-    main()
+
+
+
+
+
+
+
+
+
+@echo off
+title VLDS Pro - Test Run
+cd /d "%~dp0"
+echo Testing app_tk.py...
+echo If a window appears, the app is working correctly.
+echo If you see an error, copy it and share it.
+echo.
+python app_tk.py
+echo.
+echo App closed. If you saw no window, there is an import error above.
+pause
+
+
+
+
+
+
+
+
+
+@echo off
+title VLDS Pro - Check Imports
+cd /d "%~dp0"
+echo Checking all imports...
+echo.
+python -c "import tkinter; print('tkinter OK')"
+python -c "import pandas; print('pandas OK')"
+python -c "import openpyxl; print('openpyxl OK')"
+python -c "import sys; sys.path.insert(0,'modules'); from utils import parse_excl, parse_slab; print('utils OK')"
+python -c "import sys; sys.path.insert(0,'modules'); from processor import VLDSProcessor; print('processor OK')"
+echo.
+echo If all lines say OK, run TEST_RUN.bat
+echo If any line shows an error, that module needs fixing.
+echo.
+pause
