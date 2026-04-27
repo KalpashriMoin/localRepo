@@ -41,15 +41,58 @@ C_GREEN_LT= "#EBF2E8"
 C_AMBER_LT= "#FEF3C7"
 
 FILE_DEFS = [
-    ("vlds_main",   "VLDS Main File",        True),
-    ("df_recd",     "DF & RECD File",         True),
-    ("prev_year",   "Previous Year Summary",  True),
-    ("dealer_list", "4S Dealer List",         True),
-    ("excl_file",   "Exclusion List",         True),
-    ("slab_file",   "Slab Table",             True),
-    ("base_data",   "Base Data",              False),
+    ("vlds_main",   "VLDS Main File",                    True),
+    ("df_recd",     "DF & RECD File",                    True),
+    ("prev_year",   "Previous Year Summary",             True),
+    ("combined",    "Combined File (Dealer+Excl+Slab)",  True),
+    ("base_data",   "Base Data",                         False),
 ]
-REQ_KEYS = ["vlds_main","df_recd","prev_year","dealer_list","excl_file","slab_file"]
+REQ_KEYS = ["vlds_main","df_recd","prev_year","combined"]
+
+# Sheet names expected inside the combined file
+COMBINED_SHEETS = {
+    "dealer_list": ["4s dealer","dealer list","dealer","sheet1"],
+    "excl_file":   ["exclusion","excl","exclusion list","sheet2"],
+    "slab_file":   ["slab","slab table","payout","incentive","sheet3"],
+}
+
+def _load_combined(path):
+    """
+    Load the combined Excel file (3 sheets) and return
+    (dealer_buf, excl_buf, slab_buf) — each as BytesIO with .name set.
+    Sheet order: Sheet1=4S Dealer, Sheet2=Exclusion, Sheet3=Slab
+    Also works if sheets are named explicitly.
+    """
+    raw = open(path,"rb").read()
+    xl  = pd.ExcelFile(io.BytesIO(raw))
+    sheets = [s.lower().strip() for s in xl.sheet_names]
+
+    def _match(hints):
+        for h in hints:
+            for i, s in enumerate(sheets):
+                if h in s or s in h:
+                    return xl.sheet_names[i]
+        # fallback to positional
+        return None
+
+    # Try name match first, then positional
+    dealer_sheet = _match(COMBINED_SHEETS["dealer_list"]) or (xl.sheet_names[0] if len(xl.sheet_names)>=1 else None)
+    excl_sheet   = _match(COMBINED_SHEETS["excl_file"])   or (xl.sheet_names[1] if len(xl.sheet_names)>=2 else None)
+    slab_sheet   = _match(COMBINED_SHEETS["slab_file"])   or (xl.sheet_names[2] if len(xl.sheet_names)>=3 else None)
+
+    def _sheet_buf(sheet_name, logical_name):
+        buf = io.BytesIO()
+        df  = pd.read_excel(io.BytesIO(raw), sheet_name=sheet_name, header=None, dtype=str)
+        df.to_excel(buf, index=False, header=False)
+        buf.seek(0)
+        buf.name = logical_name + ".xlsx"
+        return buf
+
+    return (
+        _sheet_buf(dealer_sheet, "dealer_list") if dealer_sheet else None,
+        _sheet_buf(excl_sheet,   "excl_file")   if excl_sheet   else None,
+        _sheet_buf(slab_sheet,   "slab_file")   if slab_sheet   else None,
+    )
 
 SLOT_KW = {
     "vlds_main":   ["vlds main","vlds-main","vlds_main","4s main"],
@@ -267,7 +310,7 @@ class VLDSApp:
         # Quarter
         qf = tk.Frame(r1, bg=C_WHITE)
         qf.pack(side="left", padx=(0,20))
-        tk.Label(qf,"Quarter",font=("Segoe UI",9,"bold"),
+        tk.Label(qf,text="Quarter",font=("Segoe UI",9,"bold"),
                  fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
         self.quarter_var = tk.StringVar(value="Q4")
         ttk.Combobox(qf, textvariable=self.quarter_var,
@@ -277,7 +320,7 @@ class VLDSApp:
         # Year
         yf = tk.Frame(r1, bg=C_WHITE)
         yf.pack(side="left", padx=(0,20))
-        tk.Label(yf,"Year",font=("Segoe UI",9,"bold"),
+        tk.Label(yf,text="Year",font=("Segoe UI",9,"bold"),
                  fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
         self.year_var = tk.StringVar(value="2025")
         ttk.Combobox(yf, textvariable=self.year_var,
@@ -287,7 +330,7 @@ class VLDSApp:
         # Custom year
         cyf = tk.Frame(r1, bg=C_WHITE)
         cyf.pack(side="left")
-        tk.Label(cyf,"Custom Year",font=("Segoe UI",9,"bold"),
+        tk.Label(cyf,text="Custom Year",font=("Segoe UI",9,"bold"),
                  fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
         self.custom_yr = tk.StringVar()
         ttk.Entry(cyf, textvariable=self.custom_yr, width=9).pack(pady=2, ipady=3)
@@ -295,7 +338,7 @@ class VLDSApp:
         # Payout type
         r2 = tk.Frame(cfg, bg=C_WHITE)
         r2.pack(fill="x", padx=12, pady=(0,10))
-        tk.Label(r2,"Payout Type",font=("Segoe UI",9,"bold"),
+        tk.Label(r2,text="Payout Type",font=("Segoe UI",9,"bold"),
                  fg=C_SUMMIT,bg=C_WHITE).pack(anchor="w")
         pf = tk.Frame(r2, bg=C_WHITE)
         pf.pack(anchor="w")
@@ -449,11 +492,20 @@ class VLDSApp:
     def _worker(self):
         def cb(pct, msg): self.q.put(("prog", pct, msg))
         try:
-            excl = parse_excl(_open_file(self.files["excl_file"]))
-            slab = parse_slab(_open_file(self.files["slab_file"]))
+            # Load combined file → 3 sheets → dealer, excl, slab
+            dealer_buf, excl_buf, slab_buf = _load_combined(self.files["combined"])
+            if not dealer_buf or not excl_buf or not slab_buf:
+                self.q.put(("err",
+                    "Combined file must have at least 3 sheets:\n"
+                    "  Sheet 1 = 4S Dealer List\n"
+                    "  Sheet 2 = Exclusion List\n"
+                    "  Sheet 3 = Slab Table")); return
+
+            excl = parse_excl(excl_buf)
+            slab = parse_slab(slab_buf)
             if slab.empty:
-                self.q.put(("err","Slab table could not be parsed.\n"
-                    "Make sure columns A/B/C/D have numeric growth & payout values.")); return
+                self.q.put(("err","Slab table (Sheet 3) could not be parsed.\n"
+                    "Make sure Sheet 3 has numeric growth & payout values.")); return
             self.q.put(("slab_ok", len(slab)))
 
             q_sel = self.quarter_var.get()
@@ -467,7 +519,7 @@ class VLDSApp:
                 vlds_f        = _open_file(self.files["vlds_main"]),
                 dfrecd_f      = _open_file(self.files["df_recd"]),
                 prev_f        = _open_file(self.files["prev_year"]),
-                dealer_f      = _open_file(self.files["dealer_list"]),
+                dealer_f      = dealer_buf,
                 prev_join_col = self._auto_jc,
                 prev_amt_col  = self._auto_ac,
                 slab_type     = st,
@@ -570,116 +622,3 @@ if __name__ == "__main__":
             pass
     app = VLDSApp(root)
     root.mainloop()
-
-
-
-
-
-
-
-
-
-
-
-@echo off
-title VLDS Pro - Build EXE
-color 0A
-echo.
-echo  ============================================
-echo    VLDS Pro - Building EXE
-echo  ============================================
-echo.
-
-cd /d "%~dp0"
-
-echo [1/3] Installing PyInstaller...
-pip install pyinstaller pillow --quiet
-if errorlevel 1 (
-    echo ERROR: pip install failed
-    pause
-    exit /b 1
-)
-
-echo [2/3] Building EXE... (takes 3-5 minutes, please wait)
-echo.
-
-pyinstaller ^
-  --onefile ^
-  --noconsole ^
-  --name "VLDS_Pro" ^
-  --add-data "modules;modules" ^
-  --add-data "logo.PNG;." ^
-  --paths "." ^
-  --paths "modules" ^
-  --hidden-import "pandas" ^
-  --hidden-import "openpyxl" ^
-  --hidden-import "xlsxwriter" ^
-  --hidden-import "xlrd" ^
-  --hidden-import "PIL" ^
-  --hidden-import "tkinter" ^
-  --hidden-import "tkinter.ttk" ^
-  --hidden-import "tkinter.filedialog" ^
-  --hidden-import "tkinter.messagebox" ^
-  app_tk.py
-
-echo.
-echo [3/3] Done!
-echo.
-if exist "dist\VLDS_Pro.exe" (
-    color 0A
-    echo  SUCCESS - Your EXE is ready at:
-    echo  %~dp0dist\VLDS_Pro.exe
-    echo.
-    echo  Copy these files to the client:
-    echo    dist\VLDS_Pro.exe
-) else (
-    color 0C
-    echo  BUILD FAILED - Check errors above
-)
-echo.
-pause
-
-
-
-
-
-
-
-
-
-
-@echo off
-title VLDS Pro - Test Run
-cd /d "%~dp0"
-echo Testing app_tk.py...
-echo If a window appears, the app is working correctly.
-echo If you see an error, copy it and share it.
-echo.
-python app_tk.py
-echo.
-echo App closed. If you saw no window, there is an import error above.
-pause
-
-
-
-
-
-
-
-
-
-@echo off
-title VLDS Pro - Check Imports
-cd /d "%~dp0"
-echo Checking all imports...
-echo.
-python -c "import tkinter; print('tkinter OK')"
-python -c "import pandas; print('pandas OK')"
-python -c "import openpyxl; print('openpyxl OK')"
-python -c "import sys; sys.path.insert(0,'modules'); from utils import parse_excl, parse_slab; print('utils OK')"
-python -c "import sys; sys.path.insert(0,'modules'); from processor import VLDSProcessor; print('processor OK')"
-echo.
-echo If all lines say OK, run TEST_RUN.bat
-echo If any line shows an error, that module needs fixing.
-echo.
-pause
