@@ -1,1 +1,37 @@
+── Build Discount % formula from slab brackets ──────────────
+                # This creates a nested IF formula like:
+                #   =IF(H4<10,0.5,IF(H4<20,1.0,IF(H4<30,1.5,2.0)))
+                # "__ROW__" is replaced per row with the actual Excel row number.
+                # Fully dynamic: changes every quarter based on uploaded slab file.
+                def _build_disc_formula(slab_df, payout_col, growth_col_letter):
+                    pay_col = ("Quarterly Payout(%)"
+                               if "quarterly" in payout_col.lower()
+                               else "Annual Payout(%)")
+                    if slab_df is None or slab_df.empty:
+                        return f"=0"
+                    try:
+                        brackets = []
+                        for _, r in slab_df.iterrows():
+                            lo  = float(r["Growth Min(%)"])
+                            hi  = float(r["Growth Max(%)"])
+                            pct = float(r[pay_col])
+                            brackets.append((lo, hi, pct))
+                        brackets.sort(key=lambda x: x[0])
+                        if not brackets:
+                            return "=0"
+                        # Build nested IF from innermost outward
+                        # Last bracket: just return its payout (catches everything above)
+                        formula = str(brackets[-1][2])
+                        for lo, hi, pct in reversed(brackets[:-1]):
+                            g = f"{growth_col_letter}__ROW__"
+                            formula = f"IF({g}<{hi},{pct},{formula})"
+                        return f"={formula}"
+                    except Exception:
+                        return "=0"
 
+                if ci_growth is not None:
+                    g_letter = col_letter(ci_growth)
+                    disc_pct_formula = _build_disc_formula(
+                        self.slab, slab_type, g_letter)
+                else:
+                    disc_pct_formula = "=0"
