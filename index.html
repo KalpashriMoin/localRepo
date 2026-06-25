@@ -1,37 +1,62 @@
-── Build Discount % formula from slab brackets ──────────────
-                # This creates a nested IF formula like:
-                #   =IF(H4<10,0.5,IF(H4<20,1.0,IF(H4<30,1.5,2.0)))
-                # "__ROW__" is replaced per row with the actual Excel row number.
-                # Fully dynamic: changes every quarter based on uploaded slab file.
-                def _build_disc_formula(slab_df, payout_col, growth_col_letter):
-                    pay_col = ("Quarterly Payout(%)"
-                               if "quarterly" in payout_col.lower()
-                               else "Annual Payout(%)")
-                    if slab_df is None or slab_df.empty:
-                        return f"=0"
-                    try:
-                        brackets = []
-                        for _, r in slab_df.iterrows():
-                            lo  = float(r["Growth Min(%)"])
-                            hi  = float(r["Growth Max(%)"])
-                            pct = float(r[pay_col])
-                            brackets.append((lo, hi, pct))
-                        brackets.sort(key=lambda x: x[0])
-                        if not brackets:
-                            return "=0"
-                        # Build nested IF from innermost outward
-                        # Last bracket: just return its payout (catches everything above)
-                        formula = str(brackets[-1][2])
-                        for lo, hi, pct in reversed(brackets[:-1]):
-                            g = f"{growth_col_letter}__ROW__"
-                            formula = f"IF({g}<{hi},{pct},{formula})"
-                        return f"={formula}"
-                    except Exception:
-                        return "=0"
+def step4_exclusions(self, df):
+        self.L("Step 4 ▸ Applying exclusion list …")
+        rem_col   = fcol(df.columns, "remark","remarks","consider for vd") or "Remark"
+        inv_col   = fcol(df.columns, "invoice type","invoicetype",
+                         "order header subtype code","transaction type")
+        line_col  = fcol(df.columns, "line item","line item description",
+                         "inventory item description","item description")
+        item_col  = fcol(df.columns, "item number","item_number","item no","item",
+                         "inventory item number")
+        batch_col = fcol(df.columns, "batch source","batchsource")
+        seg_col   = fcol(df.columns, "segment")
+        df = df.copy()
+        if rem_col not in df.columns: df[rem_col] = ""
 
-                if ci_growth is not None:
-                    g_letter = col_letter(ci_growth)
-                    disc_pct_formula = _build_disc_formula(
-                        self.slab, slab_type, g_letter)
-                else:
-                    disc_pct_formula = "=0"
+        total_f = 0
+        for _, row in self.excl.iterrows():
+            part     = str(row.get("Particulars","")).strip()
+            item_n   = str(row.get("Item No","NA")).strip().upper()
+            col_hint = str(row.get("Column","Line Item")).strip().upper()
+            if not part: continue
+            pu  = part.upper()
+
+            # Determine which VLDS column to search the Particulars value in
+            # based on "Column where filter applied"
+            tgt = None
+            if "INVOICE" in col_hint or "TRANSACTION" in col_hint:
+                tgt = inv_col
+            elif "BATCH" in col_hint:
+                tgt = batch_col
+            elif "SEGMENT" in col_hint:
+                tgt = seg_col
+            elif "LINE ITEM" in col_hint or "LINE" in col_hint:
+                tgt = line_col
+            elif "ITEM" in col_hint:
+                tgt = item_col
+            else:
+                tgt = line_col  # default fallback
+
+            already = N(df[rem_col]) != ""
+            mask    = pd.Series(False, index=df.index)
+
+            if item_n in ("NA", "N/A", ""):
+                # Item Name is NA → search Particulars value in the column
+                # specified by "Column where filter applied"
+                if tgt and tgt in df.columns:
+                    mask |= N(df[tgt]).str.contains(pu, regex=False, na=False)
+            else:
+                # Item Name has a value → search Item Name in Item column
+                # AND search Particulars in Line Item column
+                if item_col and item_col in df.columns:
+                    mask |= (N(df[item_col]).str.contains(item_n, regex=False, na=False))
+                if line_col and line_col in df.columns:
+                    mask |= N(df[line_col]).str.contains(pu, regex=False, na=False)
+
+            nf = mask & ~already
+            if nf.sum() > 0:
+                df.loc[nf, rem_col] = f"Exclusion List - {part}"
+                total_f += nf.sum()
+                self.L(f"    Excluded {nf.sum():,} rows for: {part}")
+
+        self.L(f"  Total exclusion flagged: {total_f:,} rows", "success")
+        return df
