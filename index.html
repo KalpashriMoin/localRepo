@@ -60,3 +60,34 @@ def step4_exclusions(self, df):
 
         self.L(f"  Total exclusion flagged: {total_f:,} rows", "success")
         return df
+
+
+
+
+elig = eligible.copy()
+
+        # Fill NaN in index columns with placeholder so pivot_table keeps every row
+        for c in idx:
+            elig[c] = elig[c].fillna("(blank)").astype(str).str.strip()
+            elig[c] = elig[c].replace("", "(blank)")
+
+        # ── Customer Name deduplication by Customer Number ─────────────────
+        # Problem: Same dealer appears with different names across quarters
+        # e.g. "Company A (formerly known as Company B)" vs "Company A"
+        # Both have the same Customer Number but create separate pivot rows.
+        # Fix: For each Customer Number, keep only the FIRST Customer Name
+        # found in the current quarter data. This ensures one row per dealer.
+        if cn_col and no_col and cn_col in elig.columns and no_col in elig.columns:
+            # Build a mapping: Customer Number → first Customer Name
+            name_map = elig.drop_duplicates(subset=[no_col], keep="first") \
+                           .set_index(no_col)[cn_col].to_dict()
+            # Strip text in parentheses like "(formerly known as ...)"
+            cleaned_map = {}
+            for code, name in name_map.items():
+                clean = re.sub(r'\s*\(.*?\)\s*', '', str(name)).strip()
+                cleaned_map[code] = clean if clean else str(name)
+            # Apply the cleaned name to ALL rows for that Customer Number
+            elig[cn_col] = elig[no_col].map(cleaned_map).fillna(elig[cn_col])
+            dupes = len(name_map) - len(set(cleaned_map.values()))
+            if dupes > 0:
+                self.L(f"  Deduplicated {dupes} customer name(s) by number", "warning")
