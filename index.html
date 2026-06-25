@@ -9,85 +9,139 @@ def step4_exclusions(self, df):
                          "inventory item number")
         batch_col = fcol(df.columns, "batch source","batchsource")
         seg_col   = fcol(df.columns, "segment")
+        rev_col   = fcol(df.columns, "revenue amount","revenue_amount",
+                         "net amount","amount","revenue")
         df = df.copy()
         if rem_col not in df.columns: df[rem_col] = ""
 
+        self.L(f"  Detected columns → Line Item: '{line_col}' | Item: '{item_col}' | "
+               f"Invoice: '{inv_col}' | Batch: '{batch_col}' | Segment: '{seg_col}'")
+        self.L(f"  Total exclusion rules to apply: {len(self.excl)}")
+        self.L(f"  Rows before exclusion: {len(df):,}")
+
+        if rev_col and rev_col in df.columns:
+            rev_before = pd.to_numeric(
+                df[rev_col].astype(str).str.replace(",","",regex=False),
+                errors="coerce").fillna(0).sum()
+            self.L(f"  Revenue before exclusion: ₹{rev_before/1e7:,.4f} Cr")
+
         total_f = 0
-        for _, row in self.excl.iterrows():
+        matched_items = []
+        unmatched_items = []
+
+        for idx_r, row in self.excl.iterrows():
             part     = str(row.get("Particulars","")).strip()
             item_n   = str(row.get("Item No","NA")).strip().upper()
             col_hint = str(row.get("Column","Line Item")).strip().upper()
             if not part: continue
             pu  = part.upper()
 
-            # Determine which VLDS column to search the Particulars value in
-            # based on "Column where filter applied"
+            # Determine target column from "Column where filter applied"
             tgt = None
+            tgt_name = ""
             if "INVOICE" in col_hint or "TRANSACTION" in col_hint:
-                tgt = inv_col
+                tgt = inv_col; tgt_name = "Invoice/Transaction"
             elif "BATCH" in col_hint:
-                tgt = batch_col
+                tgt = batch_col; tgt_name = "Batch Source"
             elif "SEGMENT" in col_hint:
-                tgt = seg_col
+                tgt = seg_col; tgt_name = "Segment"
             elif "LINE ITEM" in col_hint or "LINE" in col_hint:
-                tgt = line_col
+                tgt = line_col; tgt_name = "Line Item"
             elif "ITEM" in col_hint:
-                tgt = item_col
+                tgt = item_col; tgt_name = "Item"
             else:
-                tgt = line_col  # default fallback
+                tgt = line_col; tgt_name = "Line Item (default)"
 
             already = N(df[rem_col]) != ""
             mask    = pd.Series(False, index=df.index)
 
+            search_desc = ""
             if item_n in ("NA", "N/A", ""):
-                # Item Name is NA → search Particulars value in the column
-                # specified by "Column where filter applied"
+                # Item Name is NA → search Particulars in the target column
                 if tgt and tgt in df.columns:
                     mask |= N(df[tgt]).str.contains(pu, regex=False, na=False)
+                    search_desc = f"'{part}' in [{tgt}] ({tgt_name})"
+                else:
+                    search_desc = f"'{part}' → TARGET COL '{tgt_name}' NOT FOUND"
             else:
-                # Item Name has a value → search Item Name in Item column
-                # AND search Particulars in Line Item column
+                # Item Name has value → search in Item column + Line Item column
                 if item_col and item_col in df.columns:
                     mask |= (N(df[item_col]).str.contains(item_n, regex=False, na=False))
                 if line_col and line_col in df.columns:
                     mask |= N(df[line_col]).str.contains(pu, regex=False, na=False)
+                search_desc = f"'{part}' in [{line_col}] + '{item_n}' in [{item_col}]"
 
+            # Count total matches (including already-flagged rows)
+            total_match = mask.sum()
             nf = mask & ~already
-            if nf.sum() > 0:
+            new_match = nf.sum()
+
+            # Calculate revenue impact for this exclusion item
+            rev_impact = 0
+            if rev_col and rev_col in df.columns and new_match > 0:
+                rev_impact = pd.to_numeric(
+                    df.loc[nf, rev_col].astype(str).str.replace(",","",regex=False),
+                    errors="coerce").fillna(0).sum()
+
+            if new_match > 0:
                 df.loc[nf, rem_col] = f"Exclusion List - {part}"
-                total_f += nf.sum()
-                self.L(f"    Excluded {nf.sum():,} rows for: {part}")
+                total_f += new_match
+                matched_items.append({
+                    "sr": idx_r + 1,
+                    "particular": part,
+                    "item_name": item_n,
+                    "search": search_desc,
+                    "total_found": total_match,
+                    "newly_flagged": new_match,
+                    "already_flagged": total_match - new_match,
+                    "rev_impact": rev_impact
+                })
+            else:
+                unmatched_items.append({
+                    "sr": idx_r + 1,
+                    "particular": part,
+                    "item_name": item_n,
+                    "search": search_desc,
+                    "total_found": total_match,
+                })
 
-        self.L(f"  Total exclusion flagged: {total_f:,} rows", "success")
+        # ── Detailed audit log ────────────────────────────────────────────
+        self.L(f"\n  ═══ EXCLUSION AUDIT REPORT ═══")
+        self.L(f"  Total exclusion rules: {len(self.excl)}")
+        self.L(f"  Rules that MATCHED data: {len(matched_items)}")
+        self.L(f"  Rules that found NO rows: {len(unmatched_items)}")
+        self.L(f"  Total rows newly flagged: {total_f:,}")
+
+        if matched_items:
+            self.L(f"\n  ── MATCHED ITEMS ({len(matched_items)}) ──")
+            for m in matched_items:
+                self.L(f"    ✓ SR#{m['sr']:>3d} | {m['particular'][:40]:<40s} | "
+                       f"Item: {m['item_name'][:15]:<15s} | "
+                       f"Found: {m['total_found']:>5d} | "
+                       f"New: {m['newly_flagged']:>5d} | "
+                       f"Rev: ₹{m['rev_impact']/1e7:>10.4f} Cr | "
+                       f"Search: {m['search']}")
+
+        if unmatched_items:
+            self.L(f"\n  ── UNMATCHED ITEMS ({len(unmatched_items)}) — THESE DID NOT FILTER ANY ROWS ──",
+                   "warning")
+            for u in unmatched_items:
+                self.L(f"    ✗ SR#{u['sr']:>3d} | {u['particular'][:40]:<40s} | "
+                       f"Item: {u['item_name'][:15]:<15s} | "
+                       f"Search: {u['search']}", "warning")
+
+        # Revenue after exclusion
+        if rev_col and rev_col in df.columns:
+            remaining = df[N(df[rem_col]) == ""]
+            rev_after = pd.to_numeric(
+                remaining[rev_col].astype(str).str.replace(",","",regex=False),
+                errors="coerce").fillna(0).sum()
+            total_rev_excluded = sum(m["rev_impact"] for m in matched_items)
+            self.L(f"\n  ── REVENUE IMPACT ──")
+            self.L(f"  Revenue BEFORE exclusion: ₹{rev_before/1e7:,.4f} Cr")
+            self.L(f"  Revenue EXCLUDED:         ₹{total_rev_excluded/1e7:,.4f} Cr")
+            self.L(f"  Revenue AFTER exclusion:  ₹{rev_after/1e7:,.4f} Cr")
+            self.L(f"  ═══════════════════════")
+
+        self.L(f"  Flagged {total_f:,} rows total", "success")
         return df
-
-
-
-
-elig = eligible.copy()
-
-        # Fill NaN in index columns with placeholder so pivot_table keeps every row
-        for c in idx:
-            elig[c] = elig[c].fillna("(blank)").astype(str).str.strip()
-            elig[c] = elig[c].replace("", "(blank)")
-
-        # ── Customer Name deduplication by Customer Number ─────────────────
-        # Problem: Same dealer appears with different names across quarters
-        # e.g. "Company A (formerly known as Company B)" vs "Company A"
-        # Both have the same Customer Number but create separate pivot rows.
-        # Fix: For each Customer Number, keep only the FIRST Customer Name
-        # found in the current quarter data. This ensures one row per dealer.
-        if cn_col and no_col and cn_col in elig.columns and no_col in elig.columns:
-            # Build a mapping: Customer Number → first Customer Name
-            name_map = elig.drop_duplicates(subset=[no_col], keep="first") \
-                           .set_index(no_col)[cn_col].to_dict()
-            # Strip text in parentheses like "(formerly known as ...)"
-            cleaned_map = {}
-            for code, name in name_map.items():
-                clean = re.sub(r'\s*\(.*?\)\s*', '', str(name)).strip()
-                cleaned_map[code] = clean if clean else str(name)
-            # Apply the cleaned name to ALL rows for that Customer Number
-            elig[cn_col] = elig[no_col].map(cleaned_map).fillna(elig[cn_col])
-            dupes = len(name_map) - len(set(cleaned_map.values()))
-            if dupes > 0:
-                self.L(f"  Deduplicated {dupes} customer name(s) by number", "warning")
