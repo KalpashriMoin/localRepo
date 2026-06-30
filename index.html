@@ -120,3 +120,13 @@ for idx_r, row in self.excl.iterrows():
 
 
 
+# ── DIAGNOSTIC: Check rows by Batch Source to find loopholes ──────
+        if batch_col and batch_col in df.columns:
+            batch_summary = df.groupby([
+                df[batch_col].fillna("(blank)").astype(str).str.strip(),
+                (N(df[rem_col]) == "").map({True: "Eligible", False: "Excluded"})
+            ]).size().reset_index(name="Count")
+            batch_summary.columns = ["Batch Source", "Status", "Count"]
+            self.L(f"\n  ── BATCH SOURCE DIAGNOSTIC ──")
+            for _, r in batch_summary.iterrows():
+                self.L(f"    {r['Batch Source'][:35]:<35s} | {r['Status']:<10s} | {r['Count']:>6,} rows")
