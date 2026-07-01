@@ -131,9 +131,6 @@ def read_file(f):
 
 
 
-
-
-
 import pandas as pd
 
 VLDS_FILE = r"PASTE_YOUR_FULL_PATH_HERE.xlsx"
@@ -164,4 +161,76 @@ for item in test_items:
         count = vals.str.contains(item, regex=False).sum()
         if count > 0:
             print(f"  '{item}' found {count}x in column '{c}'")
+
+
+
+
+
+
+
+
+def read_file(f, sheet_hints=None):
+    """
+    Read an Excel/CSV file, automatically detecting the real header row.
+    Handles files with a blank/title row above the actual column headers.
+
+    sheet_hints: optional list of keywords to pick the correct sheet
+                 when the Excel file has multiple sheets (e.g. ["vlds","4s","main","data","q4"]).
+                 If None, uses the first/active sheet.
+    """
+    if f is None:
+        return None
+    try:
+        f.seek(0)
+        fname = str(getattr(f, "name", "")).lower()
+
+        if fname.endswith(".csv"):
+            df = pd.read_csv(f, dtype=str)
+            f.seek(0)
+            return df
+
+        # ── Determine which sheet to read ──────────────────────────────────
+        f.seek(0)
+        xl = pd.ExcelFile(f)
+        sheet_name = xl.sheet_names[0]  # default: first sheet
+
+        if sheet_hints:
+            sheets_lower = [s.lower() for s in xl.sheet_names]
+            for hint in sheet_hints:
+                h = str(hint).lower()
+                for i, s in enumerate(sheets_lower):
+                    if h in s:
+                        sheet_name = xl.sheet_names[i]
+                        break
+                else:
+                    continue
+                break
+
+        # ── Auto-detect the real header row ─────────────────────────────────
+        f.seek(0)
+        raw = pd.read_excel(f, sheet_name=sheet_name, header=None, nrows=5, dtype=str)
+        f.seek(0)
+
+        best_row = 0
+        best_count = 0
+        for i in range(len(raw)):
+            non_null = raw.iloc[i].notna().sum()
+            if non_null > best_count:
+                best_count = non_null
+                best_row = i
+
+        header_row = best_row if best_count >= 3 else 0
+
+        f.seek(0)
+        df = pd.read_excel(f, sheet_name=sheet_name, header=header_row, dtype=str)
+        f.seek(0)
+        return df
+
+    except Exception as e:
+        try:
+            f.seek(0)
+            return pd.read_excel(f, dtype=str)
+        except Exception:
+            return None
+
 
