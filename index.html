@@ -79,3 +79,43 @@ for item in test_items:
         count = vals.str.contains(item, regex=False).sum()
         if count > 0:
             print(f"  '{item}' found {count}x in column '{c}'")
+
+
+
+
+
+
+
+
+
+import pandas as pd
+
+VLDS_FILE = r"PASTE_YOUR_FULL_PATH_HERE.xlsx"
+
+# Row 1 is the real header (0-indexed) — skip row 0
+df = pd.read_excel(VLDS_FILE, header=1, dtype=str)
+
+print(f"Total rows: {len(df)}")
+print(f"All columns:\n")
+for i, c in enumerate(df.columns):
+    print(f"  [{i}] {c}")
+
+print("\n" + "="*80)
+
+# Find Item-related columns
+for c in df.columns:
+    cl = str(c).lower().strip()
+    if "item" in cl or "line" in cl or "batch" in cl or "particular" in cl:
+        sample = df[c].dropna().head(3).tolist()
+        print(f"  '{c}' → sample: {sample}")
+
+print("\n" + "="*80)
+# Check specific item codes
+test_items = ["AX1016373", "AX1016376", "AX1016379"]
+for item in test_items:
+    for c in df.columns:
+        vals = df[c].fillna("").astype(str).str.upper()
+        count = vals.str.contains(item, regex=False).sum()
+        if count > 0:
+            print(f"  '{item}' found {count}x in column '{c}'")
+
