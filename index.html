@@ -1,2 +1,32 @@
 
+import pandas as pd
+import sys
 
+# PASTE YOUR FULL FILE PATH HERE — replace the line below
+VLDS_FILE = r"PASTE_YOUR_FULL_PATH_HERE.xlsx"
+
+df = pd.read_excel(VLDS_FILE, dtype=str)
+print(f"Total rows: {len(df)}")
+print(f"All columns: {list(df.columns)}\n")
+
+for c in df.columns:
+    cl = c.lower().strip()
+    if "item" in cl and "line" not in cl and "description" not in cl:
+        print(f"  Item column found: '{c}'")
+        print(f"  Sample values: {df[c].dropna().head(5).tolist()}")
+
+test_items = ["AX1016373", "AX1016376", "AX1016379", "AX1017646", "A078L632"]
+for item in test_items:
+    for c in df.columns:
+        vals = df[c].fillna("").astype(str).str.upper()
+        count = vals.str.contains(item, regex=False).sum()
+        if count > 0:
+            print(f"\n  '{item}' found {count} times in column '{c}'")
+
+test_parts = ["DUAL FUEL KIT", "RDC EDO PARTS", "RETROFIT EMISSION"]
+for part in test_parts:
+    for c in df.columns:
+        vals = df[c].fillna("").astype(str).str.upper()
+        count = vals.str.contains(part.upper(), regex=False).sum()
+        if count > 0:
+            print(f"\n  '{part}' found {count} times in column '{c}'")
