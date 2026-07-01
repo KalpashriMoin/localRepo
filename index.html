@@ -1,4 +1,4 @@
-
+ko
 import pandas as pd
 import sys
 
@@ -230,7 +230,17 @@ def read_file(f, sheet_hints=None):
         try:
             f.seek(0)
             return pd.read_excel(f, dtype=str)
+
+
         except Exception:
             return None
 
 
+
+# ── DIRECT VERIFICATION: test 3 known items against real data ──────
+        if item_col and item_col in df.columns:
+            test_codes = ["AX1016373", "AX1016376", "AX1016379"]
+            for code in test_codes:
+                vals = df[item_col].fillna("").astype(str).str.strip().str.upper()
+                cnt = vals.str.contains(code, regex=False).sum()
+                self.L(f"  VERIFY: '{code}' found {cnt}x in live df column '{item_col}'")
