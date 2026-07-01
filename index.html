@@ -84,6 +84,52 @@ for item in test_items:
 
 
 
+def read_file(f):
+    """
+    Read an Excel/CSV file, automatically detecting the real header row.
+    Handles files with a blank/title row above the actual column headers
+    (common in exports where row 0 is empty or has a report title).
+    """
+    if f is None:
+        return None
+    try:
+        f.seek(0)
+        fname = str(getattr(f, "name", "")).lower()
+
+        if fname.endswith(".csv"):
+            df = pd.read_csv(f, dtype=str)
+            f.seek(0)
+            return df
+
+        # For Excel: scan the first 5 rows to find the real header row
+        f.seek(0)
+        raw = pd.read_excel(f, header=None, nrows=5, dtype=str)
+        f.seek(0)
+
+        best_row = 0
+        best_count = 0
+        for i in range(len(raw)):
+            non_null = raw.iloc[i].notna().sum()
+            if non_null > best_count:
+                best_count = non_null
+                best_row = i
+
+        # Only use detected row if it clearly beats row 0 (avoids false positives)
+        header_row = best_row if best_count >= 3 else 0
+
+        f.seek(0)
+        df = pd.read_excel(f, header=header_row, dtype=str)
+        f.seek(0)
+        return df
+
+    except Exception as e:
+        try:
+            f.seek(0)
+            return pd.read_excel(f, dtype=str)
+        except Exception:
+            return None
+
+
 
 
 
