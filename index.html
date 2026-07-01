@@ -30,3 +30,19 @@ for part in test_parts:
         count = vals.str.contains(part.upper(), regex=False).sum()
         if count > 0:
             print(f"\n  '{part}' found {count} times in column '{c}'")
+
+
+
+
+
+# Try reading with different header rows to find the real one
+raw = pd.read_excel(VLDS_FILE, header=None, nrows=10)
+print("=== First 10 rows raw (to find header row) ===")
+for i in range(len(raw)):
+    row_vals = raw.iloc[i].tolist()
+    non_null = sum(1 for v in row_vals if pd.notna(v))
+    print(f"Row {i}: non-null cells={non_null} | first 5 values: {row_vals[:5]}")
+
+print("\n" + "="*80)
+print("Look at the row above with the MOST non-null text values —")
+print("that is your real header row. Note its row number, then run Step 2.")
