@@ -1,28 +1,130 @@
 
 
 
+def step4_exclusions(self, df):
+        self.L("Step 4 ▸ Applying exclusion list …")
+        rem_col   = fcol(df.columns, "remark","remarks","consider for vd") or "Remark"
+        inv_col   = fcol(df.columns, "invoice type","invoicetype",
+                         "order header subtype code","transaction type")
+        line_col  = fcol(df.columns, "line item","line item description",
+                         "inventory item description","item description")
+        item_col  = fcol(df.columns, "item")
+        batch_col = fcol(df.columns, "batch source","batchsource")
+        seg_col   = fcol(df.columns, "segment")
+        rev_col   = fcol(df.columns, "revenue amount","revenue_amount",
+                         "net amount","amount","revenue")
 
+        df = df.copy()
+        if rem_col not in df.columns: df[rem_col] = ""
 
+        # ── Clean all searchable columns: strip hidden spaces/chars ──────────
+        search_cols = [c for c in [inv_col, line_col, item_col, batch_col, seg_col]
+                        if c and c in df.columns]
+        for col in search_cols:
+            df[col] = (df[col].astype(str)
+                       .str.replace('\xa0', ' ', regex=False)
+                       .str.replace(r'\s+', ' ', regex=True)
+                       .str.strip().str.upper())
 
-already = N(df[rem_col]) != ""
-            mask    = pd.Series(False, index=df.index)
+        self.L(f"  Search columns available: {search_cols}")
+        self.L(f"  Rows before exclusion: {len(df):,}")
 
-            # ── Criterion 1: ALWAYS search Particulars in the target column ──
-            # (target column comes from "Column where filter applied" —
-            #  could be Line Item, Batch Source, Invoice Type, or Segment)
-            matched_cols = []
-            if tgt and tgt in df.columns:
-                mask |= df[tgt].astype(str).str.upper().str.contains(pu_upper, regex=False, na=False)
-                matched_cols.append(f"[{tgt}]")
+        rev_before = 0
+        if rev_col and rev_col in df.columns:
+            rev_before = pd.to_numeric(
+                df[rev_col].astype(str).str.replace(",","",regex=False),
+                errors="coerce").fillna(0).sum()
+            self.L(f"  Revenue before exclusion: ₹{rev_before/1e7:,.4f} Cr")
 
-            # ── Criterion 2: If Item Name is provided, ALSO search it in Item column ──
-            if item_n_upper not in ("NA", "N/A", ""):
-                if item_col and item_col in df.columns:
-                    mask |= df[item_col].astype(str).str.upper().str.contains(item_n_upper, regex=False, na=False)
-                    matched_cols.append(f"[{item_col}]")
-                # Also check Particulars in Line Item as a safety net
-                if line_col and line_col in df.columns and line_col != tgt:
-                    mask |= df[line_col].astype(str).str.upper().str.contains(pu_upper, regex=False, na=False)
-                    matched_cols.append(f"[{line_col}]")
+        total_f = 0
+        matched_items = []
+        unmatched_items = []
 
-            search_desc = f"'{pu}' + '{item_n}' in {' + '.join(matched_cols) if matched_cols else 'NO TARGET COLUMN FOUND'}"
+        for idx_r, row in self.excl.iterrows():
+            part   = str(row.get("Particulars","")).strip()
+            item_n = str(row.get("Item No","NA")).strip()
+            if not part: continue
+            pu_upper = part.upper().strip()
+            item_n_upper = item_n.upper().strip()
+
+            already = N(df[rem_col]) != ""
+            mask = pd.Series(False, index=df.index)
+            hit_cols = []
+
+            # ── Search Particulars text across EVERY available column ────────
+            # (No dependency on "Column where filter applied" parsing —
+            #  guarantees a match wherever the text actually appears)
+            for col in search_cols:
+                col_mask = df[col].str.contains(pu_upper, regex=False, na=False)
+                if col_mask.any():
+                    mask |= col_mask
+                    hit_cols.append(col)
+
+            # ── If Item Name is given, ALSO match it in the Item column ──────
+            if item_n_upper not in ("NA", "N/A", "") and item_col and item_col in df.columns:
+                item_mask = df[item_col].str.contains(item_n_upper, regex=False, na=False)
+                if item_mask.any():
+                    mask |= item_mask
+                    if item_col not in hit_cols:
+                        hit_cols.append(item_col)
+
+            total_match = mask.sum()
+            nf = mask & ~already
+            new_match = nf.sum()
+
+            rev_impact = 0
+            if rev_col and rev_col in df.columns and new_match > 0:
+                rev_impact = pd.to_numeric(
+                    df.loc[nf, rev_col].astype(str).str.replace(",","",regex=False),
+                    errors="coerce").fillna(0).sum()
+
+            if new_match > 0:
+                df.loc[nf, rem_col] = f"Exclusion List - {part}"
+                total_f += new_match
+                matched_items.append({
+                    "sr": idx_r+1, "particular": part, "item_name": item_n,
+                    "cols": hit_cols, "found": total_match,
+                    "new": new_match, "rev": rev_impact
+                })
+            elif total_match > 0:
+                matched_items.append({
+                    "sr": idx_r+1, "particular": part, "item_name": item_n,
+                    "cols": hit_cols, "found": total_match, "new": 0, "rev": 0
+                })
+            else:
+                unmatched_items.append({
+                    "sr": idx_r+1, "particular": part, "item_name": item_n
+                })
+
+        self.L(f"\n  ═══ EXCLUSION AUDIT REPORT ═══")
+        self.L(f"  Total exclusion rules: {len(self.excl)}")
+        self.L(f"  Rules that MATCHED data: {len(matched_items)}")
+        self.L(f"  Rules that found NO rows: {len(unmatched_items)}")
+        self.L(f"  Total rows newly flagged: {total_f:,}")
+
+        for m in matched_items:
+            self.L(f"    ✓ SR#{m['sr']:>3d} | {m['particular'][:40]:<40s} | "
+                   f"Found:{m['found']:>5d} New:{m['new']:>5d} | "
+                   f"Rev:₹{m['rev']/1e7:>8.4f}Cr | Cols:{m['cols']}")
+
+        for u in unmatched_items[:50]:
+            self.L(f"    ✗ SR#{u['sr']:>3d} | {u['particular'][:40]:<40s} | Item:{u['item_name']}",
+                   "warning")
+
+        if rev_col and rev_col in df.columns:
+            remaining = df[N(df[rem_col]) == ""]
+            rev_after = pd.to_numeric(
+                remaining[rev_col].astype(str).str.replace(",","",regex=False),
+                errors="coerce").fillna(0).sum()
+            self.L(f"\n  Revenue BEFORE: ₹{rev_before/1e7:,.4f} Cr")
+            self.L(f"  Revenue AFTER:  ₹{rev_after/1e7:,.4f} Cr")
+
+        # ── Batch Source diagnostic ───────────────────────────────────────────
+        if batch_col and batch_col in df.columns:
+            bsum = df.groupby([batch_col, (N(df[rem_col])=="").map({True:"Eligible",False:"Excluded"})]).size()
+            self.L(f"\n  ── BATCH SOURCE DIAGNOSTIC ──")
+            for (b,s),c in bsum.items():
+                self.L(f"    {b[:35]:<35s} | {s:<10s} | {c:>6,} rows")
+
+        self.L(f"  Flagged {total_f:,} rows total", "success")
+        return df
